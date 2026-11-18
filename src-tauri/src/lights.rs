@@ -116,7 +116,7 @@ impl Lights {
         let keep = if s.ticks % (2 * SEND_HZ as u64) == 0 { s.live.clone() } else { vec![] };
         let pos = (t - s.off) * s.fps;
         let k = if s.black { 0.0 } else { s.bri };
-        let frames: Vec<(String, Vec<u8>)> = s.lights.iter().map(|l| (l.ip.clone(), frame_at(l, pos, k))).collect();
+        let frames: Vec<(String, Vec<u8>)> = s.lights.iter().map(|l| (l.ip.clone(), stretch(&frame_at(l, pos, k), 84))).collect();
         drop(s);
         if !on.is_empty() || !off.is_empty() {
             std::thread::spawn(move || {
@@ -157,6 +157,13 @@ pub fn set_mode(ips: &[String], on: bool) {
     }
 }
 
+/// Always send a full 84-segment frame: the H619C ignores frames with fewer segments. Each light
+/// spreads the frame over its whole strip, so a 42-segment track still fills the strip.
+fn stretch(rgb: &[u8], n: usize) -> Vec<u8> {
+    let w = rgb.len() / 3;
+    (0..n).flat_map(|i| { let j = i * w / n * 3; [rgb[j], rgb[j + 1], rgb[j + 2]] }).collect()
+}
+
 /// The light's colours at fractional frame `pos`, blended between the two nearest frames.
 fn frame_at(l: &Light, pos: f64, k: f64) -> Vec<u8> {
     let w = l.width * 3;
@@ -183,6 +190,12 @@ mod tests {
         l.part(1, 0, vec![vec![5, 5, 5]]).unwrap(); // an older render: ignored
         assert_eq!(l.st.lock().unwrap().lights[0].frames, vec![0, 0, 0, 9, 9, 9, 0, 0, 0]);
         assert!(l.part(2, 2, vec![vec![1, 1, 1, 1, 1, 1]]).is_err()); // past the end
+    }
+
+    #[test]
+    fn stretches_to_full_frames() {
+        assert_eq!(stretch(&[1, 2, 3, 4, 5, 6], 4), vec![1, 2, 3, 1, 2, 3, 4, 5, 6, 4, 5, 6]);
+        assert_eq!(stretch(&[7, 8, 9], 84).len(), 84 * 3);
     }
 
     #[test]
