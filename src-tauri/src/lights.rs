@@ -16,6 +16,7 @@ const SEND_HZ: f64 = 120.0;
 pub struct Output {
     pub ip: String,
     pub max: usize,
+    pub lead: f64, // seconds this light shows frames late; it gets them that much early
     pub fast: bool, // measured to keep up with 120 frames/s; others get every 5th frame
     pub tracks: Vec<Track>,
 }
@@ -122,7 +123,7 @@ impl Lights {
             .iter()
             .filter(|o| o.fast || even)
             .map(|o| {
-                let cols = sm.step(&o.ip, &fx::light_colors(&o.tracks, t - show.off, &cx), ms, show.smooth);
+                let cols = sm.step(&o.ip, &fx::light_colors(&o.tracks, t - show.off + o.lead, &cx), ms, show.smooth);
                 let rgb: Vec<u8> = cols.iter().flat_map(|c| c.unwrap_or([0.0; 3]).map(|v| (v * k).round() as u8)).collect();
                 (o.ip.clone(), stretch(&rgb, o.max))
             })

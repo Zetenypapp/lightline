@@ -308,7 +308,7 @@ impl App {
             let Some(d) = tr.dev.as_ref().and_then(|id| self.devices.iter().find(|d| &d.id == id)) else { continue };
             match outputs.iter_mut().find(|o| o.ip == d.ip) {
                 Some(o) => o.tracks.push(tr.clone()),
-                None => outputs.push(Output { ip: d.ip.clone(), max: self.light_segs(d), fast: FAST_MEASURED.contains(&d.sku.as_str()), tracks: vec![tr.clone()] }),
+                None => outputs.push(Output { ip: d.ip.clone(), max: self.light_segs(d), lead: self.settings.ldelay.get(&d.id).copied().unwrap_or(0.0) / 1000.0, fast: FAST_MEASURED.contains(&d.sku.as_str()), tracks: vec![tr.clone()] }),
             }
         }
         for o in &mut outputs {
@@ -604,6 +604,14 @@ impl App {
             ui.label(RichText::new("Max segments").color(MUTED));
             if ui.add(egui::DragValue::new(&mut n).range(1..=84)).on_hover_text("The most colours this light accepts per frame. Too high and it goes dark during scenes.").changed() {
                 self.settings.lsegs.insert(id.clone(), n);
+                self.settings_dirty = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            let mut ms = self.settings.ldelay.get(&id).copied().unwrap_or(0.0);
+            ui.label(RichText::new("Delay").color(MUTED));
+            if ui.add(egui::DragValue::new(&mut ms).range(0.0..=500.0).speed(1.0).suffix(" ms")).on_hover_text("How late this light shows colours. It gets its frames this much early, so it lines up with your other lights.").changed() {
+                self.settings.ldelay.insert(id.clone(), ms);
                 self.settings_dirty = true;
             }
         });
