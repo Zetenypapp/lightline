@@ -594,7 +594,12 @@ impl App {
         }).collect();
         o.seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
         let mut s = self.sc().clone();
-        s.name = format!("{} ({} · {} · {})", s.name, show::PALETTES[o.pal].0, show::SPEEDS[o.speed], show::FOCUS[o.focus]);
+        // Building from a built scene: replace its "(colours · speed · focus)", don't stack another.
+        let base = match s.name.find(" (") {
+            Some(i) if s.name.ends_with(')') && s.name[i..].contains(" · ") => s.name[..i].to_string(),
+            _ => s.name.clone(),
+        };
+        s.name = format!("{} ({} · {} · {})", base, show::PALETTES[o.pal].0, show::SPEEDS[o.speed], show::FOCUS[o.focus]);
         s.tracks = show::build(&an, s.len, &lights, o);
         self.scenes.push(s);
         self.dirty = true;
