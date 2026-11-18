@@ -681,7 +681,14 @@ impl App {
                 });
                 ui.add_space(16.0);
                 ui.label(RichText::new("Scenes").color(MUTED).strong());
-                ui.horizontal_wrapped(|ui| {
+                // Cards in rows that fit the window (egui doesn't wrap frames on its own).
+                let gap = ui.spacing().item_spacing.x;
+                let per_row = (((ui.available_width() + gap) / (258.0 + gap)) as usize).max(1);
+                let total = self.scenes.len() + 1;
+                for row in 0..total.div_ceil(per_row) {
+                ui.horizontal(|ui| {
+                for item in row * per_row..((row + 1) * per_row).min(total) {
+                    if item == 0 {
                     let (r, resp) = ui.allocate_exact_size(Vec2::new(250.0, 180.0), Sense::click());
                     let hov = resp.hovered();
                     ui.painter().rect_stroke(r.shrink(1.0), 14, Stroke::new(2.0, if hov { ACCENT } else { PANEL3 }), StrokeKind::Inside);
@@ -699,7 +706,8 @@ impl App {
                         self.dirty = true;
                         self.open(&ctx, n - 1, Page::Editor);
                     }
-                    for i in 0..self.scenes.len() {
+                    } else {
+                        let i = item - 1;
                         card(ui, |ui| {
                             let s = &self.scenes[i];
                             let cols = s.tracks.first().map(|tr| fx::track_colors(tr, s.len / 3.0, &Ctx { an: None, bpm: s.bpm })).unwrap_or_default();
@@ -719,7 +727,9 @@ impl App {
                             });
                         });
                     }
+                }
                 });
+                }
             });
         });
     }
