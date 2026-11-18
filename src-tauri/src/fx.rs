@@ -6,8 +6,16 @@ use std::collections::HashMap;
 
 pub type Rgb = [f32; 3];
 
-pub const EFFECTS: [&str; 20] = [
-    "Solid", "Gradient", "Chase", "Pulse", "Breathe", "Wave", "Comet", "Sparkle", "Fire", "Alternate", "Beat flash", "Strobe", "Rainbow", "Bass hit", "Spectrum", "Meter", "Visualizer", "Kick", "Voice", "Lead",
+pub const EFFECTS: [&str; 33] = [
+    "Solid", "Gradient", "Chase", "Pulse", "Breathe", "Wave", "Comet", "Sparkle", "Fire", "Alternate", "Beat flash", "Strobe", "Rainbow",
+    "Riser", "Converge", "Scanner", "Stack", "Heartbeat", "Colour jump",
+    "Bass hit", "Spectrum", "Meter", "Visualizer", "Kick", "Voice", "Lead",
+    "Ripple", "Hi-hats", "Glitch", "Snare", "Bass VU", "Drop flash", "Treble",
+];
+
+/// Effects that follow the song itself (the rest are patterns timed to the beat).
+pub const REACTIVE: [&str; 14] = [
+    "Bass hit", "Spectrum", "Meter", "Visualizer", "Kick", "Voice", "Lead", "Ripple", "Hi-hats", "Glitch", "Snare", "Bass VU", "Drop flash", "Treble",
 ];
 
 /// Starting colours for effects that need specific ones.
@@ -18,6 +26,9 @@ pub fn default_colors(fx: &str) -> Option<([u8; 3], [u8; 3])> {
         "Sparkle" => ([0x1a, 0x2a, 0x6c], [0xff, 0xff, 0xff]),
         "Strobe" => ([0xff, 0xff, 0xff], [0x00, 0x00, 0x00]),
         "Meter" => ([0x2f, 0xd8, 0xb4], [0xff, 0x2a, 0x4a]),
+        "Hi-hats" => ([0x1a, 0x2a, 0x6c], [0xff, 0xff, 0xff]),
+        "Snare" | "Drop flash" => ([0xff, 0xff, 0xff], [0x00, 0x00, 0x00]),
+        "Ripple" => ([0x2f, 0xd8, 0xb4], [0xff, 0xff, 0xff]),
         _ => return None,
     })
 }
@@ -88,6 +99,39 @@ impl Ctx<'_> {
         self.at(t).map_or(0.0, |(a, f)| band_hit(a, f, 0..4))
     }
 
+    /// Snare hits (about 1-3 kHz jumps), 0..1.
+    fn snare(&self, t: f64) -> f32 {
+        self.at(t).map_or(0.0, |(a, f)| band_hit(a, f, 12..17))
+    }
+
+    /// Hi-hat / cymbal hits (the top bands), 0..1.
+    fn hats(&self, t: f64) -> f32 {
+        self.at(t).map_or(0.0, |(a, f)| band_hit(a, f, 19..SPEC))
+    }
+
+    /// Treble loudness right now, 0..1.
+    fn treble(&self, t: f64) -> f32 {
+        let Some((a, f)) = self.at(t) else { return 0.0 };
+        (16..SPEC).map(|k| a.spec[f * SPEC + k] as f32).sum::<f32>() / (SPEC - 16) as f32 / 255.0
+    }
+
+    /// Kick drums in the last 0.9 s: (seconds ago, strength 0..1), for rings that spread out.
+    fn kick_onsets(&self, t: f64) -> Vec<(f32, f32)> {
+        let Some((a, f)) = self.at(t) else { return vec![] };
+        let (w, back) = ((0.3 * a.fps) as usize, (0.9 * a.fps) as usize);
+        let lvl = |g: usize| (0..4).map(|k| a.spec[g * SPEC + k] as f32).sum::<f32>() / 4.0 / 255.0;
+        let rise = |g: usize| {
+            let lo = g.saturating_sub(w);
+            if lo == g { 0.0 } else { lvl(g) - (lo..g).map(lvl).sum::<f32>() / (g - lo) as f32 }
+        };
+        let g0 = f.saturating_sub(back + 1);
+        let r: Vec<f32> = (g0..=f).map(rise).collect();
+        (1..r.len())
+            .filter(|&k| r[k] > 0.12 && r[k] >= r[k - 1] && r[k] > r.get(k + 1).copied().unwrap_or(f32::MIN))
+            .map(|k| ((f - (g0 + k)) as f32 / a.fps as f32, (r[k] * 4.0).min(1.0)))
+            .collect()
+    }
+
     /// Vocal-range loudness (about 400 Hz-1.7 kHz) over the last 0.1 s, 0..1.
     fn voice(&self, t: f64) -> f32 {
         let Some((a, f)) = self.at(t) else { return 0.0 };
@@ -149,7 +193,7 @@ impl Ctx<'_> {
 }
 
 /// Effects coloured by the clip's colour list (rainbow when it is empty).
-pub const PALETTE_FX: [&str; 3] = ["Spectrum", "Meter", "Visualizer"];
+pub const PALETTE_FX: [&str; 4] = ["Spectrum", "Meter", "Visualizer", "Colour jump"];
 
 /// Colour at x (0..1) along the clip's colour list; empty list = rainbow.
 fn pal_at(pal: &[[u8; 3]], x: f32) -> Rgb {
@@ -200,9 +244,16 @@ fn clip_colors(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
     let level = match c.fx.as_str() {
         "Kick" => cx.kick(t).powf(0.6),
         "Voice" => cx.voice(t),
+        "Snare" | "Glitch" => cx.snare(t),
+        "Hi-hats" => cx.hats(t),
+        "Treble" => cx.treble(t),
+        "Bass VU" => cx.band(t, 0),
         _ => 0.0,
     };
-    let lead = (c.fx == "Lead").then(|| cx.vis(t));
+    let rings = if c.fx == "Ripple" { cx.kick_onsets(t) } else { vec![] };
+    let lead = matches!(c.fx.as_str(), "Lead" | "Drop flash").then(|| cx.vis(t));
+    let q = ((t - c.start) / c.len.max(1e-6)).clamp(0.0, 1.0) as f32; // how far into the clip
+    let edge = |x: f32| x.min(1.0 - x) * 2.0; // 0 at both ends, 1 in the middle
     let vis = (c.fx == "Visualizer").then(|| (cx.vis(t), frac(cx.beat_pos(t).floor() * 0.13) as f32)); // colours shift each beat
     (0..n)
         .map(|j| {
@@ -241,6 +292,56 @@ fn clip_colors(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
                     let dist = (i as f32 - v.at * (n - 1) as f32).abs();
                     lvl(mix(lvl(b2, (1.0 - dist / 4.0).max(0.0) * 0.35), a, (1.0 - dist).max(0.0)), v.laser)
                 }
+                // --- patterns ---
+                "Riser" => if edge(x) <= q { lvl(mix(a, b2, q), 0.25 + 0.75 * q) } else { [0.0; 3] },
+                "Converge" => {
+                    let f4 = frac(b / 4.0) as f32;
+                    let (e, pos) = (x.min(1.0 - x), f4 * 0.5);
+                    let head = (1.0 - (e - pos).abs() * n as f32 / 2.0).max(0.0);
+                    let tail = if e <= pos { (1.0 - (pos - e) * 4.0).max(0.0) * 0.5 } else { 0.0 };
+                    screen(Some(lvl(a, head.max(tail))), Some(lvl(b2, (-f4 * 12.0).exp()))).unwrap() // burst as they meet
+                }
+                "Scanner" => {
+                    let pos = 1.0 - (2.0 * frac(b * 0.5) as f32 - 1.0).abs();
+                    let d = (x - pos).abs();
+                    screen(Some(lvl(a, (1.0 - d * n as f32 / 3.0).max(0.0))), Some(lvl(b2, (-d * 6.0).exp() * 0.35))).unwrap()
+                }
+                "Stack" => {
+                    let f8 = frac(b / 4.0) * 8.0;
+                    let (idx, sub, bs) = (f8.floor() as usize, frac(f8), (n / 8).max(1));
+                    let blk = |k: usize| if k % 2 == 0 { a } else { b2 };
+                    let jb = (n - 1 - i) / bs;
+                    if jb < idx {
+                        blk(jb)
+                    } else {
+                        let top = (sub * n.saturating_sub((idx + 1) * bs) as f64) as usize;
+                        if i >= top && i < top + bs { blk(idx) } else { [0.0; 3] }
+                    }
+                }
+                "Heartbeat" => {
+                    let second = if fb > 0.28 { 0.75 * (-(fb - 0.28) * 14.0).exp() } else { 0.0 };
+                    lvl(a, (-fb * 14.0).exp().max(second))
+                }
+                "Colour jump" => {
+                    let k = b.floor();
+                    let col = if c.pal.is_empty() { hsl(k as f32 * 67.0, 100.0, 50.0) } else { rgb(c.pal[(k.rem_euclid(c.pal.len() as f64)) as usize]) };
+                    lvl(col, 1.0 - 0.35 * fb)
+                }
+                // --- react to the song ---
+                "Ripple" => {
+                    let d = if n == 1 { 0.0 } else { (x - 0.5).abs() * 2.0 };
+                    let v = rings.iter().map(|&(age, s)| s * (1.0 - age / 0.9).max(0.0) * (-((d - age * 1.6) / 0.08).powi(2)).exp()).fold(0.0, f32::max);
+                    lvl(mix(a, b2, d), v)
+                }
+                "Hi-hats" => if rnd(i as f64, (p * 16.0).floor()) > 1.0 - level as f64 * 0.6 { b2 } else { lvl(a, 0.08) },
+                "Glitch" => {
+                    let (blk, step) = ((i / 4) as f64, (t * 24.0).floor());
+                    if rnd(blk, step) < level as f64 * 0.8 { if rnd(blk + 0.5, step) > 0.5 { a } else { b2 } } else { [0.0; 3] }
+                }
+                "Snare" => lvl(a, level.powf(0.8)),
+                "Bass VU" => if level > 0.02 && edge(x) <= level { mix(a, b2, edge(x) / level) } else { [0.0; 3] },
+                "Drop flash" => lvl(a, lead.as_ref().unwrap().flash),
+                "Treble" => lvl(mix(a, b2, x), level.powf(1.2)),
                 "Visualizer" => {
                     let (v, shift) = vis.as_ref().unwrap();
                     let g = ((x * GROUPS as f32) as usize).min(GROUPS - 1);

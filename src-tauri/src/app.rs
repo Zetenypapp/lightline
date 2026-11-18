@@ -875,8 +875,11 @@ impl App {
     fn library(&mut self, ui: &mut Ui) {
         ui.label(RichText::new("Effects").color(MUTED).strong());
         let cx = Ctx { an: None, bpm: 120.0 };
-        egui::Grid::new("fx").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
-            for (i, fxn) in EFFECTS.iter().enumerate() {
+        for (title, reactive) in [("Reacts to the music", true), ("Patterns", false)] {
+        ui.add_space(4.0);
+        ui.label(RichText::new(title).color(ACCENT).small());
+        egui::Grid::new(("fx", reactive)).num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
+            for (i, fxn) in EFFECTS.iter().filter(|f| fx::REACTIVE.contains(f) == reactive).enumerate() {
                 let (col, col2) = fx::default_colors(fxn).unwrap_or(([0x2f, 0xd8, 0xb4], [0x7c, 0x6c, 0xff]));
                 let demo = Track { name: String::new(), segs: 8, from: 0, dev: None, clips: vec![Clip { fx: fxn.to_string(), start: 0.0, len: 1e9, col, col2, bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![] }] };
                 let clicked = ui.dnd_drag_source(ui.scope_id().with(("fx", i)), Drop::Fx(fxn), |ui| {
@@ -896,6 +899,11 @@ impl App {
                 }
             }
         });
+        if reactive {
+            ui.add_space(6.0);
+            ui.separator();
+        }
+        }
         ui.label(RichText::new("Drag an effect onto a track, or click to add it at the playhead on the selected track.").color(MUTED).small());
         ui.add_space(10.0);
         ui.label(RichText::new("Lights").color(MUTED).strong());

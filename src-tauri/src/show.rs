@@ -66,8 +66,8 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
     // Bars per pattern change: verses / choruses.
     let (verse_every, chorus_every) = if chill { (8, 4) } else if wild { (2, 1) } else { (4, 2) };
     let base_speed = if chill { 0.5 } else if wild { 2.0 } else { 1.0 };
-    let verse_pool: [&'static str; 4] = if beat { ["Beat flash", "Alternate", "Pulse", "Chase"] } else if vocals { ["Wave", "Comet", "Breathe", "Gradient"] } else if melody { ["Comet", "Wave", "Chase", "Sparkle"] } else { ["Beat flash", "Comet", "Alternate", "Chase"] };
-    let chorus_pool: [&'static str; 4] = if beat { ["Beat flash", "Alternate", "Pulse", "Chase"] } else if vocals { ["Wave", "Alternate", "Sparkle", "Comet"] } else if melody { ["Comet", "Chase", "Sparkle", "Wave"] } else { ["Alternate", "Chase", "Beat flash", "Sparkle"] };
+    let verse_pool: [&'static str; 4] = if beat { ["Beat flash", "Heartbeat", "Stack", "Alternate"] } else if vocals { ["Wave", "Comet", "Breathe", "Gradient"] } else if melody { ["Comet", "Wave", "Scanner", "Sparkle"] } else { ["Beat flash", "Comet", "Scanner", "Chase"] };
+    let chorus_pool: [&'static str; 4] = if beat { ["Stack", "Alternate", "Beat flash", "Converge"] } else if vocals { ["Wave", "Alternate", "Sparkle", "Comet"] } else if melody { ["Comet", "Scanner", "Sparkle", "Converge"] } else { ["Alternate", "Converge", "Beat flash", "Sparkle"] };
     let rnd = |k: u64| (o.seed ^ k.wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 33;
     let strobe = |a: f64, b: f64, col: [u8; 3]| if o.strobes { Clip { speed: 0.5, ..clip("Strobe", a, b, col, BLACK) } } else { flash(a, (b - a).min(0.8), col) };
 
@@ -90,8 +90,12 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
         for (pi, &(a, b, part)) in parts.iter().enumerate() {
             let after_quiet = pi > 0 && matches!(parts[pi - 1].2, Part::Intro | Part::Gap | Part::Break);
             if parts.get(pi + 1).map(|p| p.2) == Some(Part::Chorus) && !matches!(part, Part::Gap | Part::Break) && !chill {
-                if let Some(&(x, _)) = bars_in(a, b, 1).last().filter(|bar| bar.0 > a) {
-                    acc.push(strobe(x, b, hot)); // into the chorus
+                let bars = bars_in(a, b, 1);
+                if let Some(&(x, _)) = bars.iter().rev().nth(1).filter(|bar| bar.0 > a) {
+                    acc.push(clip("Riser", x, b, alt, hot)); // fill up over the last 2 bars into the chorus
+                }
+                if let Some(&(x, _)) = bars.last().filter(|bar| bar.0 > a && (wild || !o.strobes)) {
+                    acc.push(strobe(x, b, hot));
                 }
             }
             let pick = |pool: &[&'static str; 4], i: usize| pool[(rnd(pi as u64 * 64 + i as u64) + lk) as usize % pool.len()];
@@ -125,7 +129,7 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
                     if dot && !beat {
                         acc.push(clip("Lead", a + 0.5, b, WHITE, hot));
                     }
-                    react.push(if vocals { clip("Voice", a, b, WHITE, alt) } else { clip("Kick", a, b, WHITE, alt) });
+                    react.push(if vocals { clip("Voice", a, b, WHITE, alt) } else if beat || wild { clip("Ripple", a, b, WHITE, alt) } else { clip("Kick", a, b, WHITE, alt) });
                     for (i, (x, y)) in bars_in(a, b, chorus_every).into_iter().enumerate() {
                         let (c1, c2) = if swap(i) { (hot, main) } else { (alt, hot) };
                         base.push(if one { clip("Alternate", x, y, hot, alt) } else { Clip { speed: base_speed, rev: swap(i + 100), ..clip(pick(&chorus_pool, i), x, y, c1, c2) } });
