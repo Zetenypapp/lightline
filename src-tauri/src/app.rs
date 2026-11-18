@@ -29,7 +29,7 @@ const ROW_H: f32 = 46.0;
 /// Most colours per frame a light accepts (more and it rejects the frame and goes dark), measured on the
 /// user's lights. Other models start at their Govee-app segment count.
 const SEG_MEASURED: [(&str, usize); 3] = [("H61F6", 84), ("H619C", 24), ("H6609", 10)];
-/// Lights seen keeping up with 60+ frames/s (H61F6 can't; unknown models get 30).
+/// Lights seen keeping up with 120 frames/s (H61F6 can't; unknown models get 30).
 const FAST_MEASURED: [&str; 1] = ["H619C"];
 
 #[derive(PartialEq, Clone, Copy)]
