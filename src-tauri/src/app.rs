@@ -176,6 +176,11 @@ impl App {
             .unwrap_or(10)
     }
 
+    /// All the segments of a light, for a track that just got it.
+    fn full_segs(&self, id: &str) -> usize {
+        self.devices.iter().find(|d| d.id == id).map_or(15, |d| self.light_segs(d))
+    }
+
     fn track_light(&self, tr: &Track) -> String {
         match &tr.dev {
             None => "No light".into(),
@@ -542,7 +547,7 @@ impl App {
                         let tracks: Vec<Track> = if self.devices.is_empty() {
                             vec![Track { name: "Track 1".into(), segs: 15, from: 0, dev: None, clips: vec![] }]
                         } else {
-                            self.devices.iter().map(|d| Track { name: self.dev_name(d), segs: 15, from: 0, dev: Some(d.id.clone()), clips: vec![] }).collect()
+                            self.devices.iter().map(|d| Track { name: self.dev_name(d), segs: self.light_segs(d), from: 0, dev: Some(d.id.clone()), clips: vec![] }).collect()
                         };
                         let n = self.scenes.len() + 1;
                         self.scenes.push(Scene { name: format!("Scene {n}"), len: 60.0, bpm: 120.0, audio: None, tracks });
@@ -864,6 +869,9 @@ impl App {
             ui.label("Segments");
             ui.add(egui::DragValue::new(&mut segs).range(1..=84));
         });
+        if let Some(id) = dev.as_ref().filter(|_| dev != tr.dev) {
+            (from, segs) = (1, self.full_segs(id)); // a new light: use all of it
+        }
         if dev != tr.dev || from != tr.from + 1 || segs != tr.segs {
             let t = &mut self.sc_mut().tracks[ti];
             (t.dev, t.from, t.segs) = (dev, from - 1, segs);
@@ -874,7 +882,7 @@ impl App {
             let others: Vec<&Track> = self.sc().tracks.iter().filter(|x| !std::ptr::eq(*x, tr) && x.dev.as_ref() == Some(id)).collect();
             let shared: Vec<&str> = others.iter().filter(|x| x.from < end(tr) && tr.from < end(x)).map(|x| x.name.as_str()).collect();
             if !shared.is_empty() {
-                ui.label(RichText::new(format!("Layered on the same segments with: {}. Their colours mix. Change \"Starts at segment\" to split them into zones.", shared.join(", "))).color(WARN).small());
+                ui.label(RichText::new(format!("Layered on the same segments with: {}. The higher track wins where both are lit. Change \"Starts at segment\" to split them into zones.", shared.join(", "))).color(WARN).small());
             }
             let total = others.iter().map(|x| end(x)).chain([end(tr)]).max().unwrap_or(0);
             if total > 84 {
@@ -1247,7 +1255,9 @@ impl App {
         match d {
             Drop::Fx(fxn) => self.add_clip(ti, fxn, at),
             Drop::Light(id) => {
-                self.sc_mut().tracks[ti].dev = Some(id.clone());
+                let segs = self.full_segs(id);
+                let t = &mut self.sc_mut().tracks[ti];
+                (t.dev, t.from, t.segs) = (Some(id.clone()), 0, segs);
                 self.ti = ti;
             }
         }
