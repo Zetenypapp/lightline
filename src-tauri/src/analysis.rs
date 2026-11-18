@@ -6,6 +6,13 @@ use rustfft::{num_complex::Complex, FftPlanner};
 
 const N: usize = 2048;
 const HOP: usize = 512;
+/// Log-spaced spectrum bands for the Spectrum effect.
+pub const SPEC: usize = 24;
+
+/// Spectrum band of FFT bin `k` (bins 2..kmax, log scale so every band gets at least one bin).
+fn spec_band(k: usize, kmax: usize) -> Option<usize> {
+    (k >= 2 && k < kmax).then(|| (((k as f64 / 2.0).ln() / (kmax as f64 / 2.0).ln()) * SPEC as f64) as usize).map(|b| b.min(SPEC - 1))
+}
 
 pub struct Analysis {
     pub bpm: f64,
@@ -16,6 +23,8 @@ pub struct Analysis {
     pub lag: f64,
     /// Per frame: bass, mid, high, each 0..255.
     pub bands: Vec<u8>,
+    /// Per frame: SPEC log-spaced bands, each 0..255.
+    pub spec: Vec<u8>,
 }
 
 pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
@@ -25,7 +34,7 @@ pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
     let frames = if mono.len() > N { (mono.len() - N) / HOP + 1 } else { 0 };
     // Under 2 s there is too little to find a tempo (and the lag search would underflow).
     if frames < (fps * 2.0) as usize {
-        return Analysis { bpm: 120.0, beats: vec![], downbeats: vec![], fps, lag, bands: vec![] };
+        return Analysis { bpm: 120.0, beats: vec![], downbeats: vec![], fps, lag, bands: vec![], spec: vec![] };
     }
 
     let win: Vec<f32> = (0..N)
@@ -40,14 +49,17 @@ pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
     let mut prev = vec![0f32; N / 2];
     let mut onset = Vec::with_capacity(frames);
     let mut bass_onset = Vec::with_capacity(frames);
-    let mut energy = Vec::with_capacity(frames);
+    let mut energy = Vec::with_capacity(frames * 3);
+    let kmax = (N / 2).min((16000.0 / bin_hz) as usize);
+    let band_of: Vec<Option<usize>> = (0..N / 2).map(|k| spec_band(k, kmax)).collect();
+    let mut spec = Vec::with_capacity(frames * SPEC);
     for f in 0..frames {
         let s = &mono[f * HOP..f * HOP + N];
         for i in 0..N {
             buf[i] = Complex::new(s[i] * win[i], 0.0);
         }
         fft.process(&mut buf);
-        let (mut flux, mut bflux, mut e) = (0f32, 0f32, [0f32; 3]);
+        let (mut flux, mut bflux, mut e, mut sp) = (0f32, 0f32, [0f32; 3], [0f32; SPEC]);
         for k in 1..N / 2 {
             let m = buf[k].norm();
             let lm = (1.0 + 10.0 * m).ln();
@@ -58,10 +70,14 @@ pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
                 bflux += d;
             }
             e[if k < lo_end { 0 } else if k < mid_end { 1 } else { 2 }] += m * m;
+            if let Some(b) = band_of[k] {
+                sp[b] += m * m;
+            }
         }
         onset.push(flux);
         bass_onset.push(bflux);
-        energy.push(e.map(f32::sqrt));
+        energy.extend(e.map(f32::sqrt));
+        spec.extend(sp.map(f32::sqrt));
     }
     let onset = normalize(&onset);
     let bass_onset = normalize(&bass_onset);
@@ -97,17 +113,23 @@ pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
         60.0 * fps / period
     };
 
-    let mut bands = vec![0u8; frames * 3];
-    for b in 0..3 {
-        let mut v: Vec<f32> = energy.iter().map(|e| e[b]).collect();
+    let (bands, spec) = (to_u8(&energy, 3), to_u8(&spec, SPEC));
+    Analysis { bpm: (bpm * 10.0).round() / 10.0, beats, downbeats, fps, lag, bands, spec }
+}
+
+/// Scales each column of frame-major `rows` (`width` per frame) by its 98th percentile to 0..255.
+fn to_u8(rows: &[f32], width: usize) -> Vec<u8> {
+    let frames = rows.len() / width;
+    let mut out = vec![0u8; rows.len()];
+    for b in 0..width {
+        let mut v: Vec<f32> = (0..frames).map(|f| rows[f * width + b]).collect();
         v.sort_by(f32::total_cmp);
         let p98 = v[v.len() * 98 / 100].max(1e-9);
-        for (i, e) in energy.iter().enumerate() {
-            bands[i * 3 + b] = ((e[b] / p98).min(1.0) * 255.0) as u8;
+        for f in 0..frames {
+            out[f * width + b] = ((rows[f * width + b] / p98).min(1.0) * 255.0) as u8;
         }
     }
-
-    Analysis { bpm: (bpm * 10.0).round() / 10.0, beats, downbeats, fps, lag, bands }
+    out
 }
 
 /// Removes the slow trend (moving average over ~0.5 s), keeps rises, scales to unit std.
@@ -189,6 +211,23 @@ fn phase_score(bass: &[f32], beats: &[usize], k: usize) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spectrum_puts_a_tone_in_its_band_and_covers_every_band() {
+        let sr = 22050u32;
+        let x: Vec<f32> = (0..sr as usize * 3).map(|i| (i as f32 * 1000.0 * 6.2832 / sr as f32).sin() * 0.5).collect();
+        let a = super::analyze(&x, sr);
+        let s = super::SPEC;
+        let mean = |b: usize| a.spec.iter().skip(b).step_by(s).map(|&v| v as u32).sum::<u32>();
+        let loud = (0..s).max_by_key(|&b| mean(b)).unwrap();
+        let bin_hz = sr as f64 / super::N as f64;
+        let kmax = (super::N / 2).min((16000.0 / bin_hz) as usize);
+        assert_eq!(Some(loud), super::spec_band((1000.0 / bin_hz).round() as usize, kmax));
+        // every band owns at least one FFT bin, so no segment is always dark
+        for b in 0..s {
+            assert!((0..super::N / 2).any(|k| super::spec_band(k, kmax) == Some(b)), "band {b} empty");
+        }
+    }
+
     #[test]
     fn short_audio_does_not_crash() {
         for secs in [0.1, 0.4, 0.6, 1.9] {

@@ -3,8 +3,8 @@ const invoke = window.__TAURI__?.core?.invoke ?? (() => Promise.reject('Open thi
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const fmt = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
-const EFFECTS = ['Solid', 'Gradient', 'Chase', 'Pulse', 'Breathe', 'Wave', 'Comet', 'Sparkle', 'Fire', 'Alternate', 'Beat flash', 'Strobe', 'Rainbow', 'Bass hit', 'Spectrum'];
-const FX_COLORS = { Fire: ['#ff2a00', '#ffb020'], Comet: ['#2fd8b4', '#ffffff'], Sparkle: ['#1a2a6c', '#ffffff'], Strobe: ['#ffffff', '#000000'] };
+const EFFECTS = ['Solid', 'Gradient', 'Chase', 'Pulse', 'Breathe', 'Wave', 'Comet', 'Sparkle', 'Fire', 'Alternate', 'Beat flash', 'Strobe', 'Rainbow', 'Bass hit', 'Spectrum', 'Meter'];
+const FX_COLORS = { Fire: ['#ff2a00', '#ffb020'], Meter: ['#2fd8b4', '#ff2a4a'], Comet: ['#2fd8b4', '#ffffff'], Sparkle: ['#1a2a6c', '#ffffff'], Strobe: ['#ffffff', '#000000'] };
 const AUDIO_EXT = /\.(mp3|wav|flac|ogg|m4a|aac)$/i;
 const ICON = {
   play: '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4l13 8-13 8z" fill="currentColor"/></svg>',
@@ -39,6 +39,13 @@ function snap(s) {
   return b[Math.max(0, Math.min(b.length - 1, Math.round(beatPos(s))))];
 }
 const band = (t, k) => (S.an ? (S.an.bands[Math.floor((t - S.an.lag) * S.an.fps) * 3 + k] ?? 0) / 255 : 0.5);
+// Spectrum level at position x (0 = deepest bass, 1 = treble), blended between the analysis bands.
+function specAt(t, x) {
+  if (!S.an?.spec?.length) return 0.5 + 0.5 * Math.sin(x * 9 + t * 4); // no song: a moving stand-in for previews
+  const ns = S.an.nspec, f = Math.floor((t - S.an.lag) * S.an.fps) * ns, pos = x * (ns - 1), k = Math.floor(pos);
+  const a = S.an.spec[f + k] ?? 0, b = S.an.spec[f + Math.min(k + 1, ns - 1)] ?? 0;
+  return (a + (b - a) * (pos - k)) / 255;
+}
 const clip = () => S.sel && sc().tracks[S.sel.ti]?.clips[S.sel.ci];
 const pct = (s) => `${(s / sc().len) * 100}%`;
 const EMPTY = { segs: 12, clips: [] };
@@ -89,7 +96,8 @@ function colorsAt(tr, t) {
       case 'Strobe': o = frac(b * 4) < 0.5 ? A : [0, 0, 0]; break;
       case 'Rainbow': o = hsl(i * 24 + p * 90, 90, 55); break;
       case 'Bass hit': o = lvl(A, band(t, 0)); break;
-      case 'Spectrum': { const k = Math.min(2, Math.floor(x * 2.999)); o = lvl(mix(A, B, k / 2), band(t, k)); break; }
+      case 'Spectrum': o = lvl(mix(A, B, x), specAt(t, x) ** 1.5); break; // ^1.5: quiet bands drop out, peaks pop
+      case 'Meter': o = x <= (band(t, 0) + band(t, 1) + band(t, 2)) / 3 ? mix(A, B, x) : [0, 0, 0]; break;
       default: o = A;
     }
     return o.map((v) => Math.round(Math.max(0, Math.min(255, v * env))));
@@ -313,6 +321,7 @@ async function ensureAudio() {
   S.an = null; S.loading = 'Analysing music…'; render();
   try {
     const an = await invoke('load_audio', { path: a.path });
+    an.spec = Uint8Array.from(atob(an.spec), (ch) => ch.charCodeAt(0)); // sent as base64: 4x smaller than a JSON array
     // Another load finished meanwhile and the player may hold the wrong song: load the open scene's again.
     if (sc().audio?.path !== a.path) { S.an = null; return ensureAudio(); }
     S.an = an; S.anPath = a.path; S.loading = '';
