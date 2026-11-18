@@ -233,7 +233,28 @@ pub fn screen(a: Option<Rgb>, b: Option<Rgb>) -> Option<Rgb> {
     }
 }
 
+/// A clip's colours on n segments, with its repeat, mirror and "reacts to" applied.
 fn clip_colors(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
+    let span = n.div_ceil((c.repeat.max(1) as usize).min(n.max(1)));
+    let base = pattern(c, if c.mirror { span.div_ceil(2) } else { span }, t, cx);
+    let m = match c.react {
+        1 => 0.12 + 0.88 * cx.kick(t).powf(0.6),
+        2 => cx.band(t, 0),
+        3 => cx.voice(t),
+        4 => cx.treble(t),
+        _ => 1.0,
+    };
+    (0..n)
+        .map(|j| {
+            let k = j % span;
+            let k = if c.mirror { (2 * k + 1).abs_diff(span) / 2 } else { k }; // 0 in the middle, out to both sides
+            lvl(base[k.min(base.len() - 1)], m)
+        })
+        .collect()
+}
+
+/// The effect itself on n segments.
+fn pattern(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
     let (a, b2) = (rgb(c.col), rgb(c.col2));
     let p = (t - c.start) * c.speed;
     let b = (cx.beat_pos(t) - cx.beat_pos(c.start)) * c.speed;
@@ -362,7 +383,18 @@ pub fn track_colors(tr: &Track, t: f64, cx: &Ctx) -> Vec<Option<Rgb>> {
     let n = tr.segs.max(1);
     let mut out = vec![None; n];
     for c in tr.clips.iter().filter(|c| t >= c.start && t < c.start + c.len) {
-        for (o, col) in out.iter_mut().zip(clip_colors(c, n, t, cx)) {
+        let mut cols = clip_colors(c, n, t, cx);
+        // Transition in from the clip that ends where this one starts: crossfade or wipe.
+        if c.trans > 0 && t < c.start + c.tlen {
+            if let Some(p) = tr.clips.iter().find(|p| !std::ptr::eq(*p, c) && (p.start + p.len - c.start).abs() < 0.05) {
+                let k = ((t - c.start) / c.tlen.max(0.01)).clamp(0.0, 1.0) as f32;
+                let prev = clip_colors(&Clip { len: p.len + c.tlen, fout: 0.0, ..p.clone() }, n, t, cx);
+                cols = cols.iter().zip(prev).enumerate().map(|(j, (a, b))| {
+                    if c.trans == 2 { if (j as f32 + 0.5) / n as f32 <= k { *a } else { b } } else { mix(b, *a, k) }
+                }).collect();
+            }
+        }
+        for (o, col) in out.iter_mut().zip(cols) {
             *o = screen(*o, Some(col));
         }
     }
@@ -437,7 +469,7 @@ mod tests {
     use crate::scene::{Clip, Track};
 
     fn clip(fx: &str, col: [u8; 3]) -> Clip {
-        Clip { fx: fx.into(), start: 0.0, len: 4.0, col, col2: [124, 108, 255], bri: 100.0, speed: 2.0, rev: true, fin: 1.0, fout: 1.0, pal: vec![] }
+        Clip { fx: fx.into(), start: 0.0, len: 4.0, col, col2: [124, 108, 255], bri: 100.0, speed: 2.0, rev: true, fin: 1.0, fout: 1.0, pal: vec![], ..Default::default() }
     }
 
     #[test]
@@ -473,6 +505,26 @@ mod tests {
     }
 
     #[test]
+    fn mirror_repeat_and_transitions() {
+        let cx = Ctx { an: None, bpm: 120.0 };
+        let grad = Clip { fx: "Gradient".into(), col: [255, 0, 0], col2: [0, 0, 255], ..Default::default() };
+        let m = clip_colors(&Clip { mirror: true, ..grad.clone() }, 8, 1.0, &cx);
+        assert_eq!(m[0], m[7], "mirrored ends match");
+        assert_eq!(m[3], m[4], "mirrored middle matches");
+        let r = clip_colors(&Clip { repeat: 2, ..grad.clone() }, 8, 1.0, &cx);
+        assert_eq!(r[0], r[4], "repeated twice");
+        let red = Clip { fx: "Solid".into(), col: [255, 0, 0], start: 0.0, len: 2.0, ..Default::default() };
+        let blue = Clip { fx: "Solid".into(), col: [0, 0, 255], start: 2.0, len: 2.0, trans: 1, tlen: 1.0, ..Default::default() };
+        let tr = Track { name: String::new(), segs: 4, from: 0, dev: None, clips: vec![red, blue] };
+        let mid = track_colors(&tr, 2.5, &cx)[0].unwrap();
+        assert!(mid[0] > 100.0 && mid[2] > 100.0, "halfway through a crossfade: both {mid:?}");
+        let mut wipe = tr.clone();
+        wipe.clips[1].trans = 2;
+        let w = track_colors(&wipe, 2.5, &cx);
+        assert_eq!((w[0].unwrap()[2], w[3].unwrap()[0]), (255.0, 255.0), "wipe: new clip on one side, old on the other");
+    }
+
+    #[test]
     fn colour_list() {
         let p = [[255, 0, 0], [0, 0, 255]];
         assert_eq!(pal_at(&p, 0.0), [255.0, 0.0, 0.0]);
@@ -503,7 +555,7 @@ fn vis_on_song() {
     let (track, mono) = crate::audio::decode(std::path::Path::new(&path)).unwrap();
     let an = crate::analysis::analyze(&mono, track.rate);
     let cx = Ctx { an: Some(&an), bpm: 120.0 };
-    let clip = Clip { fx: "Visualizer".into(), start: 0.0, len: 999.0, col: [0; 3], col2: [0; 3], bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![] };
+    let clip = Clip { fx: "Visualizer".into(), start: 0.0, len: 999.0, col: [0; 3], col2: [0; 3], bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![], ..Default::default() };
     let mut flashes = 0;
     for i in 0..(mono.len() as f64 / track.rate as f64 * 20.0) as usize {
         let t = i as f64 / 20.0;

@@ -27,7 +27,32 @@ pub struct Clip {
     /// Colours for the music effects (Spectrum, Meter, Visualizer), blended along the strip. Empty = rainbow.
     #[serde(default, with = "hexes")]
     pub pal: Vec<[u8; 3]>,
+    /// Brightness follows: 0 nothing, 1 kick, 2 bass, 3 vocals, 4 highs.
+    #[serde(default)]
+    pub react: u8,
+    /// Mirror the effect out from the centre.
+    #[serde(default)]
+    pub mirror: bool,
+    /// Repeat the effect this many times along the strip.
+    #[serde(default = "one_u8")]
+    pub repeat: u8,
+    /// How this clip comes in after the clip that ends where it starts: 0 cut, 1 crossfade, 2 wipe.
+    #[serde(default)]
+    pub trans: u8,
+    #[serde(default = "half")]
+    pub tlen: f64,
 }
+
+impl Default for Clip {
+    fn default() -> Self {
+        Clip { fx: "Solid".into(), start: 0.0, len: 4.0, col: teal(), col2: purple(), bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![], react: 0, mirror: false, repeat: 1, trans: 0, tlen: 0.5 }
+    }
+}
+
+pub const REACT: [&str; 5] = ["Nothing", "Kick", "Bass", "Vocals", "Highs"];
+pub const TRANS: [&str; 3] = ["Cut", "Crossfade", "Wipe"];
+fn one_u8() -> u8 { 1 }
+fn half() -> f64 { 0.5 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
@@ -108,7 +133,7 @@ mod hexes {
 }
 
 pub fn demo() -> Scene {
-    let clip = |fx: &str, start: f64, len: f64, col: [u8; 3]| Clip { fx: fx.into(), start, len, col, col2: purple(), bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![] };
+    let clip = |fx: &str, start: f64, len: f64, col: [u8; 3]| Clip { fx: fx.into(), start, len, col, col2: purple(), bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![], ..Default::default() };
     let track = |name: &str, clips| Track { name: name.into(), segs: 15, from: 0, dev: None, clips };
     Scene {
         name: "Demo scene".into(),

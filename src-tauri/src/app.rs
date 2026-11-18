@@ -426,7 +426,7 @@ impl App {
         let h = (self.epoch.elapsed().as_nanos() % 360) as f32;
         let (col, col2) = fx::default_colors(fx).unwrap_or_else(|| (to_u8(fx::hsl(h, 85.0, 58.0)), to_u8(fx::hsl(h + 120.0, 85.0, 58.0))));
         let Some(tr) = self.sc_mut().tracks.get_mut(ti) else { return };
-        tr.clips.push(Clip { fx: fx.into(), start, len, col, col2, bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![] });
+        tr.clips.push(Clip { fx: fx.into(), start, len, col, col2, bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![], ..Default::default() });
         let ci = tr.clips.len() - 1;
         (self.sel, self.ti) = (Some((ti, ci)), ti);
     }
@@ -881,7 +881,7 @@ impl App {
         egui::Grid::new(("fx", reactive)).num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
             for (i, fxn) in EFFECTS.iter().filter(|f| fx::REACTIVE.contains(f) == reactive).enumerate() {
                 let (col, col2) = fx::default_colors(fxn).unwrap_or(([0x2f, 0xd8, 0xb4], [0x7c, 0x6c, 0xff]));
-                let demo = Track { name: String::new(), segs: 8, from: 0, dev: None, clips: vec![Clip { fx: fxn.to_string(), start: 0.0, len: 1e9, col, col2, bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![] }] };
+                let demo = Track { name: String::new(), segs: 8, from: 0, dev: None, clips: vec![Clip { fx: fxn.to_string(), start: 0.0, len: 1e9, col, col2, bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![], ..Default::default() }] };
                 let clicked = ui.dnd_drag_source(ui.scope_id().with(("fx", i)), Drop::Fx(fxn), |ui| {
                     let (r, resp) = ui.allocate_exact_size(Vec2::new(98.0, 66.0), Sense::click());
                     ui.painter().rect_filled(r, 12, if resp.hovered() { PANEL3 } else { PANEL2 });
@@ -983,6 +983,29 @@ impl App {
             }
         });
         changed |= ui.checkbox(&mut c.rev, "Reverse direction").changed();
+        ui.horizontal(|ui| {
+            changed |= ui.checkbox(&mut c.mirror, "Mirror").on_hover_text("Mirror the effect out from the middle").changed();
+            ui.label("Repeat");
+            for r in [1u8, 2, 4] {
+                changed |= ui.selectable_value(&mut c.repeat, r, format!("{r}×")).changed();
+            }
+        });
+        egui::ComboBox::from_label("Reacts to").selected_text(scene::REACT[c.react as usize % 5]).show_ui(ui, |ui| {
+            for (i, n) in scene::REACT.iter().enumerate() {
+                changed |= ui.selectable_value(&mut c.react, i as u8, *n).changed();
+            }
+        }).response.on_hover_text("Brightness follows this part of the music");
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("trans").selected_text(scene::TRANS[c.trans as usize % 3]).show_ui(ui, |ui| {
+                for (i, n) in scene::TRANS.iter().enumerate() {
+                    changed |= ui.selectable_value(&mut c.trans, i as u8, *n).changed();
+                }
+            });
+            if c.trans > 0 {
+                changed |= ui.add(egui::DragValue::new(&mut c.tlen).range(0.05..=4.0).speed(0.02).suffix(" s")).changed();
+            }
+            ui.label("In from the clip before");
+        });
         egui::Grid::new("clipnums").num_columns(2).show(ui, |ui| {
             let max_len = (len_total - c.start).max(0.1);
             ui.label("Start");

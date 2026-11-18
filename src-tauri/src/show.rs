@@ -52,7 +52,7 @@ const WHITE: [u8; 3] = [255, 255, 255];
 const BLACK: [u8; 3] = [0, 0, 0];
 
 fn clip(fx: &str, a: f64, b: f64, col: [u8; 3], col2: [u8; 3]) -> Clip {
-    Clip { fx: fx.into(), start: a, len: (b - a).max(0.05), col, col2, bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![] }
+    Clip { fx: fx.into(), start: a, len: (b - a).max(0.05), col, col2, bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![], ..Default::default() }
 }
 fn flash(at: f64, l: f64, col: [u8; 3]) -> Clip {
     Clip { fout: l, ..clip("Solid", at, at + l, col, BLACK) }
