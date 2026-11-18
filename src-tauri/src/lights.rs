@@ -258,7 +258,7 @@ fn rate_check() {
     set_mode(&ips, false);
 }
 
-/// Which frame sizes a light accepts: 3 s each of red (24 colours), green (30), blue (36).
+/// Which frame sizes a light accepts: 3 s each of red, green, blue at SIZES (default 24,30,36) colours.
 /// A colour that stays dark = rejected. LIGHT=ip cargo test max_colours -- --ignored
 #[test]
 #[ignore]
@@ -269,7 +269,8 @@ fn max_colours() {
         let _ = govee::stream_mode(&ip, true);
         std::thread::sleep(Duration::from_millis(500));
     }
-    for (n, col) in [(24usize, [255u8, 0, 0]), (30, [0, 255, 0]), (36, [0, 0, 255])] {
+    let sizes: Vec<usize> = std::env::var("SIZES").unwrap_or("24,30,36".into()).split(',').map(|v| v.parse().unwrap()).collect();
+    for (n, col) in sizes.into_iter().zip([[255u8, 0, 0], [0, 255, 0], [0, 0, 255]]) {
         let t0 = Instant::now();
         while t0.elapsed() < Duration::from_secs(3) {
             let _ = govee::frame(&ip, &col.repeat(n));
