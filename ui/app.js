@@ -550,7 +550,7 @@ function drag(el, e) {
   const resize = e.clientX > el.getBoundingClientRect().right - 8;
   const from = +el.dataset.ti;
   let ti = from;
-  S.sel = { ti, ci: +el.dataset.ci };
+  S.sel = { ti, ci: +el.dataset.ci }; S.ti = ti; // the track panel must follow the clicked clip
   el.setPointerCapture(e.pointerId);
   el.onpointermove = (ev) => {
     const dt = ((ev.clientX - x0) / w) * s.len;
