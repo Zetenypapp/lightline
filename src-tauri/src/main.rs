@@ -54,15 +54,23 @@ fn audio_seek(at: f64, player: State<Arc<Player>>) {
     player.seek(at)
 }
 
+/// Sent 3 times: a lost UDP packet here leaves a light stuck in (or out of) real-time mode.
 #[tauri::command]
-fn govee_stream(ips: Vec<String>, on: bool) -> Result<(), String> {
-    for ip in &ips {
-        if on {
-            govee::turn(ip, true)?;
+async fn govee_stream(ips: Vec<String>, on: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        for _ in 0..3 {
+            for ip in &ips {
+                if on {
+                    govee::turn(ip, true)?;
+                }
+                govee::stream_mode(ip, on)?;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
         }
-        govee::stream_mode(ip, on)?;
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

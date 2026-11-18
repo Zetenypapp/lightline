@@ -150,16 +150,20 @@ function deviceFrames() {
   return [...by].map(([ip, cols]) => [ip, smLights(ip, Array.from(cols, (c) => c ?? null), now).flatMap((c) => (c ? c.map((v) => Math.round(v * k)) : [0, 0, 0]))]);
 }
 let sending = false, streamIps = [];
+const setStream = (ips, on) => { if (ips.length) invoke('govee_stream', { ips, on }).catch((err) => { $('#status').textContent = String(err); }); };
 function sendFrame() {
-  const frames = deviceFrames();
+  const frames = deviceFrames(), ips = frames.map(([ip]) => ip);
+  // Lights can be (re)assigned while playing: switch new ones into real-time mode, release dropped ones.
+  setStream(ips.filter((ip) => !streamIps.includes(ip)), true);
+  setStream(streamIps.filter((ip) => !ips.includes(ip)), false);
+  streamIps = ips;
   if (sending || !frames.length) return; // never queue frames up behind a slow send
   sending = true;
   invoke('govee_frame', { frames }).catch((err) => { $('#status').textContent = String(err); }).finally(() => { sending = false; });
 }
 function stream(on) {
-  const ips = on ? [...new Set(deviceFrames().map(([ip]) => ip))] : streamIps;
-  streamIps = on ? ips : [];
-  if (ips.length) invoke('govee_stream', { ips, on }).catch((err) => { $('#status').textContent = String(err); });
+  if (!on) setStream(streamIps, false);
+  streamIps = [];
 }
 const stage = (now = performance.now()) => sc().tracks.map((tr, i) => `<div class="pv"><span class="muted small">${esc(tr.name)}</span><div class="segs">${segs(smPreview(i, colorsAt(tr, S.t), now))}</div></div>`).join('') || '<p class="muted">No tracks yet.</p>';
 
@@ -234,10 +238,13 @@ const outputPanel = () => `<h2 class="label" style="margin-top:8px">Light output
 const trackPanel = () => {
   const tr = sc().tracks[S.ti]; if (!tr) return '';
   const offline = tr.dev && !S.devices.some((d) => d.device === tr.dev);
+  const end = (x) => (x.from ?? 0) + x.segs;
+  const shared = tr.dev ? sc().tracks.filter((x) => x !== tr && x.dev === tr.dev && (x.from ?? 0) < end(tr) && (tr.from ?? 0) < end(x)) : [];
   const total = tr.dev ? Math.max(...sc().tracks.filter((x) => x.dev === tr.dev).map((x) => (x.from ?? 0) + x.segs)) : 0;
   return `<h2 class="label" style="margin-top:8px">Track · ${esc(tr.name)}</h2>
 <label class="field">Light<select data-in="tdev"><option value="">None (preview only)</option>${S.devices.map((d) => `<option value="${esc(d.device)}"${d.device === tr.dev ? ' selected' : ''}>${esc(d.sku)} · ${esc(d.ip)}</option>`).join('')}${offline ? `<option value="${esc(tr.dev)}" selected>Light not found</option>` : ''}</select></label>
 <div class="row"><label class="field" style="flex:1">Starts at segment<input type="number" min="1" max="84" value="${(tr.from ?? 0) + 1}" data-in="tfrom"></label><label class="field" style="flex:1">Segments<input type="number" min="1" max="84" value="${tr.segs}" data-in="tsegs"></label></div>
+${shared.length ? `<p class="warn small">Layered on the same segments with: ${shared.map((x) => esc(x.name)).join(', ')}. Their colours mix. Change "Starts at segment" to split them into zones.</p>` : ''}
 ${total > 84 ? `<p class="warn small">Tracks on this light reach segment ${total}, but it takes at most 84. Segments after 84 are cut off.</p>` : ''}
 <p class="muted small">Tracks on the same light layer on top of each other. Give them different start segments to make zones.</p>
 <button class="btn" data-act="delTrack">Delete track</button>`;
@@ -403,6 +410,7 @@ function open(i, page = 'editor') {
 async function scan() {
   S.scanning = true; S.msg = ''; render();
   try { S.devices = await invoke('scan'); } catch (err) { S.msg = String(err); }
+  if (!S.playing) setStream(S.devices.map((d) => d.ip), false); // free lights left stuck by a crash or lost packet
   S.scanning = false; render();
 }
 
@@ -495,7 +503,7 @@ document.addEventListener('input', (e) => {
     case 'off': S.off = v; setPref('off', v); $('#offv').textContent = `${v > 0 ? '+' : ''}${v}`; return;
     case 'smooth': S.smooth = v; setPref('smooth', v); $('#smoothv').textContent = v * 3; return;
     case 'zoom': setZoom(2 ** v); return;
-    case 'tdev': s.tracks[S.ti].dev = v; save(); return;
+    case 'tdev': s.tracks[S.ti].dev = v; save(); render(); return; // render: refresh the layering note
     case 'tfrom': if (v < 1 || v > 84) return; s.tracks[S.ti].from = Math.round(v) - 1; save(); return;
     case 'tsegs': if (v < 1 || v > 84) return; s.tracks[S.ti].segs = Math.round(v); paint(); save(); return; // warning updates on next render
     case 'bri': S.bri = v; $('#briv').textContent = v; $('#stage').style.filter = `brightness(${v}%)`; return;
