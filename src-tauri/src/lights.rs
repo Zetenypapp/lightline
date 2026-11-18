@@ -31,6 +31,7 @@ pub struct Show {
     pub bri: f64,    // 0..1
     pub off: f64,    // seconds the lights run late (+) or early (-)
     pub black: bool,
+    pub flash: bool, // held flash: every light full white
 }
 
 struct State {
@@ -125,7 +126,7 @@ impl Lights {
             .iter()
             .filter_map(|o| {
                 let cols = sm.step(&o.ip, &fx::light_colors(&o.tracks, t - show.off + o.lead, &cx), ms, o.smooth);
-                let rgb: Vec<u8> = cols.iter().flat_map(|c| c.unwrap_or([0.0; 3]).map(|v| (v * k).round() as u8)).collect();
+                let rgb: Vec<u8> = if show.flash { vec![255; cols.len() * 3] } else { cols.iter().flat_map(|c| c.unwrap_or([0.0; 3]).map(|v| (v * k).round() as u8)).collect() };
                 let rgb = stretch(&rgb, o.max);
                 if o.fast {
                     return Some((o.ip.clone(), rgb));
@@ -255,4 +256,25 @@ fn rate_check() {
         std::thread::sleep(Duration::from_secs(1));
     }
     set_mode(&ips, false);
+}
+
+/// Which frame sizes a light accepts: 3 s each of red (24 colours), green (30), blue (36).
+/// A colour that stays dark = rejected. LIGHT=ip cargo test max_colours -- --ignored
+#[test]
+#[ignore]
+fn max_colours() {
+    let ip = std::env::var("LIGHT").unwrap_or("192.168.0.120".into());
+    set_mode(&[ip.clone()], true);
+    for _ in 0..6 {
+        let _ = govee::stream_mode(&ip, true);
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    for (n, col) in [(24usize, [255u8, 0, 0]), (30, [0, 255, 0]), (36, [0, 0, 255])] {
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(3) {
+            let _ = govee::frame(&ip, &col.repeat(n));
+            std::thread::sleep(Duration::from_millis(33));
+        }
+    }
+    set_mode(&[ip], false);
 }

@@ -30,6 +30,83 @@ pub struct Analysis {
     /// Per frame: the strongest clear note between 500 Hz and 5 kHz (a lead synth, a "laser"):
     /// pitch 0..255 on a log scale, then loudness 0..255 (0 = no clear note).
     pub lead: Vec<u8>,
+    /// Song parts: (start time, part), from the loudness of each bar.
+    pub sections: Vec<(f64, Part)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Part {
+    Intro,
+    Verse,
+    Chorus,
+    Gap,   // the beat stops for a bar or two
+    Break, // longer stretch without the beat
+    Outro,
+}
+
+impl Part {
+    pub fn name(self) -> &'static str {
+        match self {
+            Part::Intro => "Intro",
+            Part::Verse => "Verse",
+            Part::Chorus => "Chorus",
+            Part::Gap => "Stop",
+            Part::Break => "Break",
+            Part::Outro => "Outro",
+        }
+    }
+}
+
+/// Splits a song into parts by bar: no beat at the start/end = intro/outro, a short stop in the beat = gap,
+/// a long one = break, the loudest bars (bass + mids + highs) = chorus, the rest = verse.
+pub fn sections(beats: &[f64], downbeats: &[f64], bands: &[u8], fps: f64, lag: f64) -> Vec<(f64, Part)> {
+    let bars: Vec<f64> = if downbeats.len() >= 2 { downbeats.to_vec() } else { beats.iter().step_by(4).copied().collect() };
+    let n = bands.len() / 3;
+    if bars.len() < 4 || n == 0 {
+        return vec![];
+    }
+    let frame = |t: f64| (((t - lag) * fps).max(0.0) as usize).min(n);
+    let bar_len = (bars[bars.len() - 1] - bars[0]) / (bars.len() - 1) as f64;
+    // Per bar: mean bass, mean mid+high.
+    let stats: Vec<(f32, f32)> = bars.iter().map(|&a| {
+        let (f0, f1) = (frame(a), frame(a + bar_len).max(frame(a) + 1).min(n));
+        let m = |k: usize| (f0..f1).map(|f| bands[f * 3 + k] as f32).sum::<f32>() / (f1 - f0).max(1) as f32;
+        (m(0), (m(1) + m(2)) / 2.0)
+    }).collect();
+    let pct = |mut v: Vec<f32>, q: f32| { v.sort_by(f32::total_cmp); v.get(((v.len().max(1) - 1) as f32 * q) as usize).copied().unwrap_or(0.0) };
+    let loud: Vec<&(f32, f32)> = stats.iter().filter(|s| s.1 > 25.0).collect();
+    let song_bass = pct(loud.iter().map(|s| s.0).collect(), 0.6);
+    let beat = |s: &(f32, f32)| s.1 > 25.0 && s.0 >= 0.4 * song_bass;
+    let score = |s: &(f32, f32)| s.1 + 0.5 * s.0;
+    let hi = pct(stats.iter().filter(|s| beat(s)).map(score).collect(), 0.65);
+    let first = stats.iter().position(beat).unwrap_or(0);
+    let last = stats.iter().rposition(beat).unwrap_or(stats.len() - 1);
+    // Chorus vs verse by majority over 5 bars, so single bars don't flicker.
+    let raw: Vec<bool> = stats.iter().map(|s| beat(s) && score(s) >= hi).collect();
+    let mut part: Vec<Part> = (0..stats.len()).map(|i| {
+        if i < first { return Part::Intro; }
+        if i > last { return Part::Outro; }
+        if !beat(&stats[i]) { return Part::Break; }
+        let w = (i.saturating_sub(2)..(i + 3).min(stats.len())).filter(|&j| beat(&stats[j]));
+        let (c, t) = w.fold((0, 0), |(c, t), j| (c + raw[j] as usize, t + 1));
+        if c * 2 > t { Part::Chorus } else { Part::Verse }
+    }).collect();
+    // Breaks of 1-2 bars are stops in the beat.
+    let mut i = 0;
+    while i < part.len() {
+        let j = (i..part.len()).find(|&j| part[j] != part[i]).unwrap_or(part.len());
+        if part[i] == Part::Break && j - i <= 2 {
+            part[i..j].fill(Part::Gap);
+        }
+        i = j;
+    }
+    let mut out: Vec<(f64, Part)> = vec![];
+    for (k, p) in part.into_iter().enumerate() {
+        if out.last().map(|l| l.1) != Some(p) {
+            out.push((if k == 0 { 0.0 } else { bars[k] }, p));
+        }
+    }
+    out
 }
 
 pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
@@ -39,7 +116,7 @@ pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
     let frames = if mono.len() > N { (mono.len() - N) / HOP + 1 } else { 0 };
     // Under 2 s there is too little to find a tempo (and the lag search would underflow).
     if frames < (fps * 2.0) as usize {
-        return Analysis { bpm: 120.0, beats: vec![], downbeats: vec![], fps, lag, bands: vec![], spec: vec![], lead: vec![] };
+        return Analysis { bpm: 120.0, beats: vec![], downbeats: vec![], fps, lag, bands: vec![], spec: vec![], lead: vec![], sections: vec![] };
     }
 
     let win: Vec<f32> = (0..N)
@@ -112,7 +189,7 @@ pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
     let phase = (0..4)
         .max_by(|&a, &b| phase_score(&bass_onset, &beat_frames, a).total_cmp(&phase_score(&bass_onset, &beat_frames, b)))
         .unwrap_or(0);
-    let downbeats = beats.iter().skip(phase).step_by(4).copied().collect();
+    let downbeats: Vec<f64> = beats.iter().skip(phase).step_by(4).copied().collect();
 
     // Tempo = least-squares slope of beat time vs beat index (averages out frame rounding).
     let bpm = if beats.len() >= 4 {
@@ -139,7 +216,8 @@ pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
         let p = ((p - p_lo) / (p_hi - p_lo).max(1e-3)).clamp(0.0, 1.0);
         [(p * 255.0).round() as u8, ((a / a_top).min(1.0) * 255.0).round() as u8]
     }).collect();
-    Analysis { bpm: (bpm * 10.0).round() / 10.0, beats, downbeats, fps, lag, bands, spec, lead }
+    let sections = sections(&beats, &downbeats, &bands, fps, lag);
+    Analysis { bpm: (bpm * 10.0).round() / 10.0, beats, downbeats, fps, lag, bands, spec, lead, sections }
 }
 
 /// Scales each column of frame-major `rows` (`width` per frame) by its 98th percentile to 0..255.
@@ -296,6 +374,7 @@ fn beat_report() {
     let (from, to) = (env("FROM", 0.0), env("TO", 30.0));
     let (track, mono) = crate::audio::decode(std::path::Path::new(&path)).unwrap();
     let a = analyze(&mono, track.rate);
+    println!("sections {:?}", a.sections.iter().map(|(t, p)| (format!("{t:.1}"), p.name())).collect::<Vec<_>>());
     println!("bpm {} beats {} downbeats {:?}", a.bpm, a.beats.len(), a.downbeats.iter().filter(|d| **d >= from && **d < to).collect::<Vec<_>>());
     let n = a.bands.len() / 3;
     for w in a.beats.windows(2).filter(|w| w[0] >= from && w[0] < to) {

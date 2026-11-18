@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
     pub fx: String,
     pub start: f64,
@@ -29,7 +29,7 @@ pub struct Clip {
     pub pal: Vec<[u8; 3]>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub name: String,
     pub segs: usize,
@@ -41,13 +41,13 @@ pub struct Track {
     pub clips: Vec<Clip>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Audio {
     pub path: String,
     pub name: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scene {
     pub name: String,
     pub len: f64,

@@ -6,6 +6,8 @@ use crate::fx::{self, Ctx, Rgb, Smoother, EFFECTS};
 use crate::govee;
 use crate::lights::{self, Lights, Output, Show};
 use crate::scene::{self, Audio, Clip, Model, Scene, Settings, Track};
+use crate::show;
+use crate::analysis::Part;
 use eframe::egui::{self, Align, Color32, CornerRadius, Frame, Layout, Margin, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver};
@@ -97,6 +99,12 @@ pub struct App {
     last_save: Instant,
     no_save: bool,
     drag: Option<Drag>,
+    undo: Vec<Vec<Scene>>,
+    redo: Vec<Vec<Scene>>,
+    committed: Vec<Scene>, // scenes as of the last finished edit
+    clip_board: Option<Clip>,
+    flash: bool,
+    palette: usize,
 }
 
 impl App {
@@ -143,7 +151,14 @@ impl App {
             last_save: Instant::now(),
             no_save,
             drag: None,
+            undo: vec![],
+            redo: vec![],
+            committed: vec![],
+            clip_board: None,
+            flash: false,
+            palette: 0,
         };
+        app.committed = app.scenes.clone();
         app.scan(&cc.egui_ctx);
         app.ensure_audio(&cc.egui_ctx);
         app
@@ -332,6 +347,7 @@ impl App {
             bri: self.bri / 100.0,
             off: self.settings.off_ms / 1000.0,
             black: self.black,
+            flash: self.flash,
         }
     }
 
@@ -413,6 +429,17 @@ impl App {
         (self.sel, self.ti) = (Some((ti, ci)), ti);
     }
 
+    /// Ctrl+Z (back = true) / Ctrl+Y.
+    fn history(&mut self, back: bool) {
+        let (from, to) = if back { (&mut self.undo, &mut self.redo) } else { (&mut self.redo, &mut self.undo) };
+        let Some(s) = from.pop() else { return };
+        to.push(std::mem::replace(&mut self.scenes, s));
+        self.committed = self.scenes.clone();
+        self.cur = self.cur.min(self.scenes.len().saturating_sub(1));
+        self.ti = self.ti.min(self.sc().tracks.len().saturating_sub(1));
+        (self.sel, self.dirty) = (None, true);
+    }
+
     fn sel_clip(&mut self) -> Option<&mut Clip> {
         let (ti, ci) = self.sel?;
         self.dirty = true;
@@ -450,7 +477,35 @@ impl eframe::App for App {
             if self.page == Page::Editor && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
                 self.delete_clip();
             }
+            if ui.input(|i| i.key_pressed(egui::Key::B)) {
+                self.black = !self.black;
+            }
+            if self.page == Page::Editor {
+                use egui::{Key, Modifiers};
+                let shift_z = ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z));
+                if shift_z || ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Y)) {
+                    self.history(false);
+                } else if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z)) {
+                    self.history(true);
+                }
+                let (copy, paste) = ui.input(|i| (
+                    i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
+                ));
+                if copy {
+                    self.clip_board = self.sel_clip().map(|c| c.clone());
+                }
+                if let Some(c) = self.clip_board.clone().filter(|_| paste && self.ti < self.sc().tracks.len()) {
+                    let (t, ti) = (self.t, self.ti);
+                    let len = self.sc().len;
+                    let clips = &mut self.sc_mut().tracks[ti].clips;
+                    clips.push(Clip { start: t.min((len - c.len).max(0.0)), ..c });
+                    let n = clips.len();
+                    self.sel = Some((ti, n - 1));
+                }
+            }
         }
+        self.flash = self.page != Page::Home && !ctx.egui_wants_keyboard_input() && ui.input(|i| i.key_down(egui::Key::F));
         // A music file dropped on the window.
         if self.page == Page::Editor {
             let dropped = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).next());
@@ -465,8 +520,17 @@ impl eframe::App for App {
             Page::Editor => self.editor(ui),
             Page::Live => self.live(ui),
         }
+        // Undo history: one step per finished edit (not per frame of a drag).
+        if !ctx.input(|i| i.pointer.any_down()) && self.scenes != self.committed {
+            self.undo.push(std::mem::replace(&mut self.committed, self.scenes.clone()));
+            if self.undo.len() > 100 {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
         self.save(false);
     }
+
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save(true);
@@ -700,12 +764,31 @@ impl App {
             let pulse = 1.0 - self.cx().beat_pos(self.t).rem_euclid(1.0) as f32;
             ui.label(RichText::new("●").color(ACCENT.gamma_multiply(0.25 + 0.75 * pulse)));
             ui.label(RichText::new(format!("{} BPM · {} beats", an.bpm, an.beats.len())).color(ACCENT));
-            if ui.button("Auto show").on_hover_text("New scene with the Visualizer on every track: drops go full white, sections blink on what they hear").clicked() {
-                let mut s = self.sc().clone();
-                s.name = format!("{} (auto)", s.name);
-                for (k, tr) in s.tracks.iter_mut().enumerate() {
-                    tr.clips = vec![Clip { fx: "Visualizer".into(), start: 0.0, len: s.len, col: [0; 3], col2: [0; 3], bri: 100.0, speed: 1.0, rev: k % 2 == 1, fin: 0.0, fout: 0.0, pal: vec![] }];
+            let an = an.clone();
+            let mut pi = self.palette;
+            egui::ComboBox::from_id_salt("palette").selected_text(show::PALETTES[pi].0).show_ui(ui, |ui| {
+                for (i, (n, _)) in show::PALETTES.iter().enumerate() {
+                    ui.selectable_value(&mut pi, i, *n);
                 }
+            });
+            self.palette = pi;
+            if ui.button("Build show").on_hover_text("New scene with a layered light show for this song, in these colours").clicked() {
+                let mut ids: Vec<String> = vec![];
+                for id in self.sc().tracks.iter().filter_map(|t| t.dev.clone()) {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+                if ids.is_empty() {
+                    ids = self.devices.iter().map(|d| d.id.clone()).collect();
+                }
+                let lights: Vec<(String, String, usize)> = ids.iter().map(|id| {
+                    let name = self.devices.iter().find(|d| &d.id == id).map_or(id.clone(), |d| self.dev_name(d));
+                    (name, id.clone(), self.full_segs(id))
+                }).collect();
+                let mut s = self.sc().clone();
+                s.name = format!("{} (show)", s.name);
+                s.tracks = show::build(&an, s.len, &lights, show::PALETTES[pi].1);
                 self.scenes.push(s);
                 self.dirty = true;
                 self.open(ctx, self.scenes.len() - 1, Page::Editor);
@@ -968,7 +1051,9 @@ impl App {
             card_wide(ui, |ui| {
                 ui.label(RichText::new("Controls").color(MUTED).strong());
                 self.output_panel(ui);
-                let label = if self.black { "Lights back on" } else { "Blackout" };
+                let fl = ui.add_sized([ui.available_width(), 40.0], egui::Button::new("Flash  (hold F)"));
+                self.flash |= fl.is_pointer_button_down_on();
+                let label = if self.black { "Lights back on  (B)" } else { "Blackout  (B)" };
                 if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(label).selected(self.black)).clicked() {
                     self.black = !self.black;
                 }
@@ -1087,6 +1172,24 @@ impl App {
             if let Some(an) = self.an.clone() {
                 let r = Rect::from_min_size(Pos2::new(lane_x, y), Vec2::new(lane_w, audio_h - 6.0));
                 p.rect_filled(r, 10, PANEL2);
+                // Song parts along the top of the song row.
+                for (k, &(t0, part)) in an.sections.iter().enumerate() {
+                    let t1 = an.sections.get(k + 1).map_or(len, |s| s.0);
+                    if t1 < vis_t0 || t0 > vis_t1 {
+                        continue;
+                    }
+                    let col = match part {
+                        Part::Chorus => ACCENT,
+                        Part::Verse => ACCENT2,
+                        Part::Gap | Part::Break => WARN,
+                        Part::Intro | Part::Outro => MUTED,
+                    };
+                    let band = Rect::from_min_max(Pos2::new(x_of(t0) + 1.0, r.top() + 2.0), Pos2::new(x_of(t1) - 1.0, r.top() + 16.0));
+                    p.rect_filled(band, 4, col.gamma_multiply(0.35));
+                    if band.width() > 44.0 {
+                        p.with_clip_rect(band).text(band.left_center() + Vec2::new(5.0, 0.0), egui::Align2::LEFT_CENTER, part.name(), egui::FontId::proportional(10.5), TEXT);
+                    }
+                }
                 let n = an.bands.len() / 3;
                 let (cols, scale) = ([ACCENT2, ACCENT, TEXT], [0.48, 0.34, 0.2]);
                 let mut x = x_of(vis_t0).max(lane_x);
