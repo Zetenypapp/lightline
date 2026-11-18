@@ -87,9 +87,9 @@ const rnd = (a, b) => frac(Math.sin(a * 12.9898 + b * 78.233) * 43758.5453); // 
 const screen = (a, b) => (!a ? b : !b ? a : a.map((v, k) => Math.round(255 - ((255 - v) * (255 - b[k])) / 255)));
 
 // All clips playing on a track at time t, layered.
-function colorsAt(tr, t) {
+function colorsAt(tr, t, black = S.black) {
   const out = Array(tr.segs).fill(null);
-  if (S.black) return out;
+  if (black) return out;
   for (const c of tr.clips) if (t >= c.start && t < c.start + c.len) clipColors(c, tr.segs, t).forEach((col, i) => { out[i] = screen(out[i], col); });
   return out;
 }
@@ -129,45 +129,66 @@ const segs = (cols) => cols.map((c) => `<i${c ? ` style="background:${css(c)};co
 // Time-based, so it looks the same at any frame rate.
 function smoother() {
   const st = new Map();
-  return (key, cols, now) => {
+  return (key, cols, now, on = S.playing) => {
     const s = st.get(key);
-    if (!s || s.v.length !== cols.length || !S.playing) { st.set(key, { v: cols.map((c) => c ?? [0, 0, 0]), now }); return cols; }
+    if (!s || s.v.length !== cols.length || !on) { st.set(key, { v: cols.map((c) => c ?? [0, 0, 0]), now }); return cols; }
     const dt = now - s.now, fall = S.smooth * 3, up = fall ? 1 - Math.exp(-dt / 20) : 1, down = fall ? 1 - Math.exp(-dt / fall) : 1;
     s.now = now;
     s.v = cols.map((c, i) => (c ?? [0, 0, 0]).map((v, k) => { const o = s.v[i][k]; return o + (v - o) * (v > o ? up : down); }));
     return s.v.map((c, i) => (!cols[i] && c.every((v) => v < 2) ? null : c.map(Math.round)));
   };
 }
-const smPreview = smoother(), smLights = smoother();
+const smPreview = smoother();
+const setStream = (ips, on) => { if (ips.length) invoke('govee_stream', { ips, on }).catch((err) => { $('#status').textContent = String(err); }); };
+const showErr = (err) => { $('#status').textContent = String(err); };
 
-// One frame per light: each track lands at its start segment, overlapping tracks layer.
-function deviceFrames() {
-  const by = new Map(), k = S.bri / 100, now = performance.now(), t = S.t - S.off / 1000;
+// The whole scene's light output, rendered ahead of time at FPS with the same code as the preview.
+// Rust plays it back on its own timer, following the audio clock, so UI hiccups can't reach the lights.
+// Per light: each track lands at its start segment, overlapping tracks layer.
+const FPS = 30;
+function lightGroups() {
+  const by = new Map();
   for (const tr of sc().tracks) {
     const d = tr.dev && S.devices.find((x) => x.device === tr.dev);
-    if (!d) continue;
-    const f = by.get(d.ip) ?? [];
-    colorsAt(tr, t).forEach((c, i) => { const j = (tr.from ?? 0) + i; f[j] = screen(f[j], c); });
-    by.set(d.ip, f);
+    if (d) by.set(d.ip, [...(by.get(d.ip) ?? []), tr]);
   }
-  return [...by].map(([ip, cols]) => [ip, smLights(ip, Array.from(cols, (c) => c ?? null), now).flatMap((c) => (c ? c.map((v) => Math.round(v * k)) : [0, 0, 0]))]);
+  return [...by].map(([ip, trs]) => ({ ip, trs, w: Math.min(84, Math.max(...trs.map((tr) => (tr.from ?? 0) + tr.segs))) }));
 }
-let sending = false, streamIps = [];
-const setStream = (ips, on) => { if (ips.length) invoke('govee_stream', { ips, on }).catch((err) => { $('#status').textContent = String(err); }); };
-function sendFrame() {
-  const frames = deviceFrames(), ips = frames.map(([ip]) => ip);
-  // Lights can be (re)assigned while playing: switch new ones into real-time mode, release dropped ones.
-  setStream(ips.filter((ip) => !streamIps.includes(ip)), true);
-  setStream(streamIps.filter((ip) => !ips.includes(ip)), false);
-  streamIps = ips;
-  if (sending || !frames.length) return; // never queue frames up behind a slow send
-  sending = true;
-  invoke('govee_frame', { frames }).catch((err) => { $('#status').textContent = String(err); }).finally(() => { sending = false; });
+// Frames a..e (exclusive) of one light; `sm` carries the smoothing across consecutive ranges.
+function renderRange({ ip, trs, w }, a, e, sm) {
+  const buf = new Uint8Array((e - a) * w * 3);
+  for (let f = a; f < e; f++) {
+    const t = f / FPS, cols = Array(w).fill(null);
+    for (const tr of trs) colorsAt(tr, t, false).forEach((c, i) => { const j = (tr.from ?? 0) + i; if (j < w) cols[j] = screen(cols[j], c); });
+    sm(ip, cols, t * 1000, true).forEach((c, i) => { if (c) buf.set(c, ((f - a) * w + i) * 3); });
+  }
+  return buf;
 }
-function stream(on) {
-  if (!on) setStream(streamIps, false);
-  streamIps = [];
+const b64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(s); };
+
+// Renders in 2 s pieces from just before the playhead to the end, then the start. `ready` fires after the
+// first piece so play starts at once; the rest fills in faster than real time without freezing the UI.
+let gen = 0;
+async function pushShow(ready = () => {}) {
+  const g = ++gen, n = Math.ceil(sc().len * FPS) + 1, lights = lightGroups();
+  try {
+    await invoke('lights_load', { gen: g, fps: FPS, frames: n, lights: lights.map((l) => [l.ip, l.w]) });
+    const from = Math.max(0, Math.floor(S.t * FPS) - FPS);
+    for (const [a, b] of [[from, n], [0, from]]) {
+      const sm = smoother();
+      for (let f = a; f < b; f += 2 * FPS) {
+        if (g !== gen || !lights.length) return;
+        const e = Math.min(b, f + 2 * FPS);
+        await invoke('lights_part', { gen: g, start: f, lights: lights.map((l) => b64(renderRange(l, f, e, sm))) });
+        ready();
+        await new Promise((r) => setTimeout(r));
+      }
+    }
+  } catch (err) { showErr(err); } finally { ready(); }
 }
+let showT = 0;
+const pushShowSoon = () => { clearTimeout(showT); showT = setTimeout(pushShow, 300); };
+const pushSettings = () => invoke('lights_set', { bri: S.bri / 100, off: S.off / 1000, black: S.black }).catch(showErr);
 const stage = (now = performance.now()) => sc().tracks.map((tr, i) => `<div class="pv"><span class="muted small">${esc(tr.name)}</span><div class="segs">${segs(smPreview(i, colorsAt(tr, S.t), now))}</div></div>`).join('') || '<p class="muted">No tracks yet.</p>';
 
 const V = {
@@ -333,14 +354,15 @@ async function setPlaying(on) {
   clearInterval(timer);
   if (on) {
     if (S.t >= sc().len) S.t = 0;
+    await new Promise((ready) => pushShow(ready)); // first frames ready before the music starts
+    if (!S.playing) return;
     if (S.an) {
-      try { await invoke('audio_play', { at: S.t }); } catch (err) { S.playing = false; $('#status').textContent = String(err); return render(); }
+      try { await invoke('audio_play', { at: S.t }); } catch (err) { S.playing = false; showErr(err); return render(); }
     }
-    stream(true);
+    invoke('lights_play', { at: S.t, audio: !!S.an }).catch(showErr);
     last = performance.now();
-    timer = setInterval(async () => { // ~30 fps for screen and lights, not the monitor's refresh rate
+    timer = setInterval(async () => { // ~30 fps screen preview; the lights run on Rust's own timer
       const now = performance.now();
-      sendFrame();
       if (S.an) { // the audio player is the clock
         const [t, playing] = await invoke('audio_state');
         if (!S.playing) return;
@@ -353,13 +375,18 @@ async function setPlaying(on) {
       if (S.t >= sc().len) setPlaying(false); else paint();
     }, 33);
   } else {
-    stream(false);
+    invoke('lights_stop').catch(showErr);
     if (S.an) invoke('audio_pause');
   }
   render();
 }
 
-const seek = (t) => { S.t = t; if (S.an) invoke('audio_seek', { at: t }); paint(); };
+const seek = (t) => {
+  S.t = t;
+  if (S.an) invoke('audio_seek', { at: t });
+  else if (S.playing) invoke('lights_play', { at: t, audio: false }); // without music the lights keep their own clock
+  paint();
+};
 
 // Loads (decodes + analyses) the current scene's song unless it is already loaded.
 async function ensureAudio() {
@@ -391,6 +418,7 @@ async function importAudio(path) {
 let saveT = 0;
 const flush = () => { saveT = 0; return invoke('save_scenes', { json: JSON.stringify(S.scenes) }).catch((err) => { $('#status').textContent = `Save failed: ${err}`; }); };
 const save = () => {
+  if (S.playing) pushShowSoon(); // edits while playing reach the lights in ~0.3 s
   if (S.noSave) return;
   clearTimeout(saveT);
   saveT = setTimeout(flush, 400);
@@ -399,13 +427,13 @@ const save = () => {
 // Before the window closes: write any pending save and hand the lights back.
 window.__TAURI__?.window.getCurrentWindow().onCloseRequested(async () => {
   if (saveT) { clearTimeout(saveT); await flush(); }
-  if (S.playing) await invoke('govee_stream', { ips: streamIps, on: false }).catch(() => {});
+  if (S.playing) await invoke('lights_stop').catch(() => {});
   for (const ip of S.blink) await invoke('govee_identify', { ip, on: false }).catch(() => {}); // never leave a light off
 });
 
 function open(i, page = 'editor') {
   clearInterval(timer);
-  if (S.playing) { stream(false); if (S.an) invoke('audio_pause'); }
+  if (S.playing) { invoke('lights_stop').catch(showErr); if (S.an) invoke('audio_pause'); }
   Object.assign(S, { cur: i, t: 0, sel: null, ti: 0, page, playing: false });
   if (sc().audio?.path !== S.anPath) S.an = null; // never show or play another scene's song
 }
@@ -457,7 +485,7 @@ const A = {
     render();
   },
   del: () => { if (!clip()) return; sc().tracks[S.sel.ti].clips.splice(S.sel.ci, 1); S.sel = null; save(); render(); },
-  black: () => { S.black = !S.black; render(); },
+  black: () => { S.black = !S.black; pushSettings(); render(); },
 };
 
 function addClip(ti, fx, at) {
@@ -503,14 +531,14 @@ document.addEventListener('input', (e) => {
   if (typeof v === 'number' && (Number.isNaN(v) || el.value === '')) return;
   switch (k) {
     case 'snap': S.snap = v; return;
-    case 'off': S.off = v; setPref('off', v); $('#offv').textContent = `${v > 0 ? '+' : ''}${v}`; return;
-    case 'smooth': S.smooth = v; setPref('smooth', v); $('#smoothv').textContent = v * 3; return;
+    case 'off': S.off = v; setPref('off', v); $('#offv').textContent = `${v > 0 ? '+' : ''}${v}`; pushSettings(); return;
+    case 'smooth': S.smooth = v; setPref('smooth', v); $('#smoothv').textContent = v * 3; if (S.playing) pushShowSoon(); return;
     case 'zoom': setZoom(2 ** v); return;
     case 'dname': if (v.trim()) S.names[el.dataset.dev] = v.trim(); else delete S.names[el.dataset.dev]; setPref('names', JSON.stringify(S.names)); return;
     case 'tdev': s.tracks[S.ti].dev = v; save(); render(); return; // render: refresh the layering note
     case 'tfrom': if (v < 1 || v > 84) return; s.tracks[S.ti].from = Math.round(v) - 1; save(); return;
     case 'tsegs': if (v < 1 || v > 84) return; s.tracks[S.ti].segs = Math.round(v); paint(); save(); return; // warning updates on next render
-    case 'bri': S.bri = v; $('#briv').textContent = v; $('#stage').style.filter = `brightness(${v}%)`; return;
+    case 'bri': S.bri = v; $('#briv').textContent = v; $('#stage').style.filter = `brightness(${v}%)`; pushSettings(); return;
     case 'name': s.name = v; save(); return;
     case 'tname': s.tracks[+el.dataset.ti].name = v; save(); return;
     case 'fx': c.fx = v; save(); render(); return;
@@ -580,7 +608,7 @@ document.addEventListener('keydown', (e) => {
 invoke('load_scenes')
   .then((j) => { const v = JSON.parse(j); if (Array.isArray(v) && v.length) S.scenes = migrate(v); })
   .catch((err) => { if (window.__TAURI__) { S.noSave = true; console.error(err); } }) // never overwrite a file we failed to read
-  .finally(() => { render(); scan(); ensureAudio(); });
+  .finally(() => { render(); scan(); ensureAudio(); pushSettings(); });
 
 window.__TAURI__?.event.listen('tauri://drag-drop', (e) => {
   const p = e.payload?.paths?.[0];

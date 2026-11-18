@@ -3,8 +3,10 @@
 mod analysis;
 mod audio;
 mod govee;
+mod lights;
 
 use audio::Player;
+use lights::Lights;
 use serde_json::json;
 use std::{fs, io::ErrorKind, path::{Path, PathBuf}, sync::Arc};
 use tauri::{Manager, State};
@@ -54,28 +56,43 @@ fn audio_seek(at: f64, player: State<Arc<Player>>) {
     player.seek(at)
 }
 
-/// Sent 3 times: a lost UDP packet here leaves a light stuck in (or out of) real-time mode.
 #[tauri::command]
 async fn govee_stream(ips: Vec<String>, on: bool) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        for _ in 0..3 {
-            for ip in &ips {
-                if on {
-                    govee::turn(ip, true)?;
-                }
-                govee::stream_mode(ip, on)?;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(40));
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || lights::set_mode(&ips, on)).await.map_err(|e| e.to_string())
+}
+
+/// Starts a show of `frames` frames at `fps` for these lights (ip, segments); `lights_part` fills it in.
+#[tauri::command]
+fn lights_load(gen: u64, fps: f64, frames: usize, lights: Vec<(String, usize)>, l: State<Arc<Lights>>) -> Result<(), String> {
+    // Bounds keep a bad call from allocating gigabytes: 2 h at 120 fps, 84 segments.
+    if !(1.0..=120.0).contains(&fps) || frames > 120 * 7200 || lights.iter().any(|(_, w)| !(1..=84).contains(w)) {
+        return Err("Bad light show".into());
+    }
+    l.load(gen, fps, frames, lights);
+    Ok(())
+}
+
+/// Rendered frames from frame `start`, base64, one entry per light in `lights_load` order.
+#[tauri::command]
+fn lights_part(gen: u64, start: usize, lights: Vec<String>, l: State<Arc<Lights>>) -> Result<(), String> {
+    let data = lights.iter().map(|d| govee::unb64(d)).collect::<Result<Vec<_>, _>>()?;
+    l.part(gen, start, data)
 }
 
 #[tauri::command]
-fn govee_frame(frames: Vec<(String, Vec<u8>)>) -> Result<(), String> {
-    frames.iter().try_for_each(|(ip, rgb)| govee::frame(ip, rgb))
+fn lights_play(at: f64, audio: bool, l: State<Arc<Lights>>) {
+    l.play(at, audio)
+}
+
+#[tauri::command]
+async fn lights_stop(l: State<'_, Arc<Lights>>) -> Result<(), String> {
+    let l = l.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || l.stop()).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn lights_set(bri: f64, off: f64, black: bool, l: State<Arc<Lights>>) {
+    l.set(bri, off, black)
 }
 
 static BLINKING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
@@ -142,11 +159,13 @@ async fn scan() -> Result<Vec<serde_json::Value>, String> {
 }
 
 fn main() {
+    let player = Player::start();
     tauri::Builder::default()
-        .manage(Player::start())
+        .manage(player.clone())
+        .manage(Lights::start(player))
         .invoke_handler(tauri::generate_handler![
             scan, load_scenes, save_scenes, pick_audio, load_audio, audio_play, audio_pause, audio_seek, audio_state,
-            govee_stream, govee_frame, govee_identify
+            govee_stream, govee_identify, lights_load, lights_part, lights_play, lights_stop, lights_set
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lightline");
