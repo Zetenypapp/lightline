@@ -9,7 +9,8 @@ const SEND_HZ: f64 = 30.0;
 
 pub struct Light {
     pub ip: String,
-    pub width: usize,     // segments
+    pub width: usize,     // segments rendered
+    pub max: usize,       // most colours the light accepts per frame: more and it rejects the frame
     pub frames: Vec<u8>,  // frame-major, width*3 bytes per frame
 }
 
@@ -18,7 +19,7 @@ struct State {
     ticks: u64,
     fps: f64,
     lights: Vec<Light>,
-    live: Vec<String>,                  // lights currently in real-time mode
+    live: Vec<(String, Instant)>,       // lights in real-time mode, since when
     play: Option<(f64, Instant, bool)>, // start time, started at, follow the audio clock
     bri: f64,
     off: f64, // seconds the lights run late (+) or early (-)
@@ -52,11 +53,11 @@ impl Lights {
     }
 
     /// Starts a new show: dark frames until `part` fills them in.
-    pub fn load(&self, gen: u64, fps: f64, frames: usize, lights: Vec<(String, usize)>) {
-        eprintln!("[lights] show {gen}: {frames} frames at {fps} fps, lights {lights:?}");
+    pub fn load(&self, gen: u64, fps: f64, frames: usize, lights: Vec<(String, usize, usize)>) {
+        eprintln!("[lights] show {gen}: {frames} frames at {fps} fps, lights (ip, rendered, sent) {lights:?}");
         let mut s = self.st.lock().unwrap();
         (s.gen, s.fps) = (gen, fps);
-        s.lights = lights.into_iter().map(|(ip, width)| Light { ip, width, frames: vec![0; frames * width * 3] }).collect();
+        s.lights = lights.into_iter().map(|(ip, width, max)| Light { ip, width, max, frames: vec![0; frames * width * 3] }).collect();
     }
 
     /// Writes rendered frames starting at frame `start`, one byte block per light in load order.
@@ -84,7 +85,7 @@ impl Lights {
         let ips = {
             let mut s = self.st.lock().unwrap();
             s.play = None;
-            std::mem::take(&mut s.live)
+            std::mem::take(&mut s.live).into_iter().map(|(ip, _)| ip).collect::<Vec<_>>()
         };
         set_mode(&ips, false);
     }
@@ -108,15 +109,22 @@ impl Lights {
         };
         // Real-time mode for exactly the lights in the show (the show can change while playing).
         let want: Vec<String> = s.lights.iter().map(|l| l.ip.clone()).collect();
-        let on: Vec<String> = want.iter().filter(|ip| !s.live.contains(ip)).cloned().collect();
-        let off: Vec<String> = s.live.iter().filter(|ip| !want.contains(ip)).cloned().collect();
-        s.live = want;
+        let on: Vec<String> = want.iter().filter(|ip| !s.live.iter().any(|(x, _)| x == *ip)).cloned().collect();
+        let off: Vec<String> = s.live.iter().map(|(ip, _)| ip).filter(|ip| !want.contains(ip)).cloned().collect();
+        let now = Instant::now();
+        s.live.retain(|(ip, _)| want.contains(ip));
+        s.live.extend(on.iter().map(|ip| (ip.clone(), now)));
         s.ticks += 1;
-        // Keep-alive: re-assert real-time mode every 2 s, so a light that dropped out comes back.
-        let keep = if s.ticks % (2 * SEND_HZ as u64) == 0 { s.live.clone() } else { vec![] };
+        // A single "start real-time mode" is sometimes ignored, and each one makes the light blink:
+        // repeat it every 0.5 s for the first 3 s only.
+        let burst: Vec<String> = if s.ticks % (SEND_HZ as u64 / 2) == 0 {
+            s.live.iter().filter(|(_, since)| since.elapsed() < Duration::from_secs(3)).map(|(ip, _)| ip.clone()).collect()
+        } else {
+            vec![]
+        };
         let pos = (t - s.off) * s.fps;
         let k = if s.black { 0.0 } else { s.bri };
-        let frames: Vec<(String, Vec<u8>)> = s.lights.iter().map(|l| (l.ip.clone(), stretch(&frame_at(l, pos, k), 84))).collect();
+        let frames: Vec<(String, Vec<u8>)> = s.lights.iter().map(|l| (l.ip.clone(), stretch(&frame_at(l, pos, k), l.max))).collect();
         drop(s);
         if !on.is_empty() || !off.is_empty() {
             std::thread::spawn(move || {
@@ -124,7 +132,7 @@ impl Lights {
                 set_mode(&off, false);
             });
         }
-        for ip in &keep {
+        for ip in &burst {
             let _ = govee::stream_mode(ip, true);
         }
         let log = (pos as u64) % 30 == 0; // about once a second
@@ -138,7 +146,7 @@ impl Lights {
 }
 
 /// Switching on: "turn on" first and let it settle, because a "turn on" that lands after real-time mode
-/// started puts some lights (the H61F6) back on their normal scene. Mode sent 3 times: lost UDP packets.
+/// started puts a light back on its normal scene. The tick then repeats the mode for 3 s.
 pub fn set_mode(ips: &[String], on: bool) {
     if ips.is_empty() {
         return;
@@ -157,8 +165,8 @@ pub fn set_mode(ips: &[String], on: bool) {
     }
 }
 
-/// Always send a full 84-segment frame: the H619C ignores frames with fewer segments. Each light
-/// spreads the frame over its whole strip, so a 42-segment track still fills the strip.
+/// Resamples a frame to exactly `n` colours: a light rejects frames with more colours than it has
+/// segments, and spreads the colours it gets over its whole strip.
 fn stretch(rgb: &[u8], n: usize) -> Vec<u8> {
     let w = rgb.len() / 3;
     (0..n).flat_map(|i| { let j = i * w / n * 3; [rgb[j], rgb[j + 1], rgb[j + 2]] }).collect()
@@ -185,7 +193,7 @@ mod tests {
     #[test]
     fn parts_fill_the_current_show_only() {
         let l = Lights { st: Mutex::new(State { gen: 0, ticks: 0, fps: 30.0, lights: vec![], live: vec![], play: None, bri: 1.0, off: 0.0, black: false }) };
-        l.load(2, 30.0, 3, vec![("x".into(), 1)]);
+        l.load(2, 30.0, 3, vec![("x".into(), 1, 1)]);
         l.part(2, 1, vec![vec![9, 9, 9]]).unwrap();
         l.part(1, 0, vec![vec![5, 5, 5]]).unwrap(); // an older render: ignored
         assert_eq!(l.st.lock().unwrap().lights[0].frames, vec![0, 0, 0, 9, 9, 9, 0, 0, 0]);
@@ -200,7 +208,7 @@ mod tests {
 
     #[test]
     fn blends_between_frames_and_scales() {
-        let l = Light { ip: String::new(), width: 1, frames: vec![0, 0, 0, 200, 100, 50] };
+        let l = Light { ip: String::new(), width: 1, max: 1, frames: vec![0, 0, 0, 200, 100, 50] };
         assert_eq!(frame_at(&l, 0.5, 1.0), vec![100, 50, 25]);
         assert_eq!(frame_at(&l, 1.0, 0.5), vec![100, 50, 25]);
         assert_eq!(frame_at(&l, 9.0, 1.0), vec![200, 100, 50]); // past the end: hold the last frame

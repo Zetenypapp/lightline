@@ -19,7 +19,11 @@ const demo = () => ({ name: 'Demo scene', len: 60, bpm: 120, tracks: [
   { name: 'Neon', segs: 12, clips: [{ fx: 'Gradient', start: 0, len: 24, hue: 260 }, { fx: 'Strobe', start: 40, len: 4, hue: 0 }] },
 ] });
 
-const S = { page: 'home', devices: [], scanning: false, msg: '', scenes: migrate([demo()]), cur: 0, sel: null, t: 0, playing: false, snap: true, bri: 100, black: false, noSave: false, an: null, anPath: '', loading: '', zoom: 1, ti: 0, blink: new Set(), off: pref('off', 0), smooth: pref('smooth', 40), names: prefJson('names') };
+const S = { page: 'home', devices: [], scanning: false, msg: '', scenes: migrate([demo()]), cur: 0, sel: null, t: 0, playing: false, snap: true, bri: 100, black: false, noSave: false, an: null, anPath: '', loading: '', zoom: 1, ti: 0, blink: new Set(), off: pref('off', 0), smooth: pref('smooth', 40), names: prefJson('names'), lsegs: prefJson('lsegs') };
+// Most colours per frame each light accepts (it rejects bigger frames and goes dark). Measured on the
+// user's lights; unknown models get a low, safe default they can raise on Home.
+const SEG_DEFAULT = { H61F6: 84, H619C: 24 };
+const lightSegs = (d) => S.lsegs[d.device] ?? SEG_DEFAULT[d.sku] ?? 10;
 function prefJson(k) { try { return JSON.parse(localStorage.getItem(k)) || {}; } catch { return {}; } }
 const devName = (d) => S.names[d.device] || d.sku;
 const trackLight = (tr) => { const d = tr.dev && S.devices.find((x) => x.device === tr.dev); return d ? devName(d) : tr.dev ? 'Light not found' : 'No light'; };
@@ -150,9 +154,12 @@ function lightGroups() {
   const by = new Map();
   for (const tr of sc().tracks) {
     const d = tr.dev && S.devices.find((x) => x.device === tr.dev);
-    if (d) by.set(d.ip, [...(by.get(d.ip) ?? []), tr]);
+    if (d) by.set(d.ip, { d, trs: [...(by.get(d.ip)?.trs ?? []), tr] });
   }
-  return [...by].map(([ip, trs]) => ({ ip, trs, w: Math.min(84, Math.max(...trs.map((tr) => (tr.from ?? 0) + tr.segs))) }));
+  return [...by].map(([ip, { d, trs }]) => {
+    const w = Math.min(84, Math.max(...trs.map((tr) => (tr.from ?? 0) + tr.segs)));
+    return { ip, trs, w, max: Math.min(w, lightSegs(d)) };
+  });
 }
 // Frames a..e (exclusive) of one light; `sm` carries the smoothing across consecutive ranges.
 function renderRange({ ip, trs, w }, a, e, sm) {
@@ -172,7 +179,7 @@ let gen = 0;
 async function pushShow(ready = () => {}) {
   const g = ++gen, n = Math.ceil(sc().len * FPS) + 1, lights = lightGroups();
   try {
-    await invoke('lights_load', { gen: g, fps: FPS, frames: n, lights: lights.map((l) => [l.ip, l.w]) });
+    await invoke('lights_load', { gen: g, fps: FPS, frames: n, lights: lights.map((l) => [l.ip, l.w, l.max]) });
     const from = Math.max(0, Math.floor(S.t * FPS) - FPS);
     for (const [a, b] of [[from, n], [0, from]]) {
       const sm = smoother();
@@ -196,7 +203,7 @@ const V = {
   <div class="head"><div><h1>Your lights</h1><p class="muted">Build scenes on a timeline, sync them to music, play them live.</p></div>
     <div class="row"><button class="btn" data-act="scan" ${S.scanning ? 'disabled' : ''}>${S.scanning ? 'Scanning…' : 'Scan network'}</button></div></div>
   <h2 class="label">Devices</h2>
-  <div class="grid">${S.devices.map((d) => `<article class="card"><div class="split"><div><input class="title" style="width:100%" aria-label="Light name" value="${esc(devName(d))}" placeholder="${esc(d.sku)}" data-in="dname" data-dev="${esc(d.device)}"><div class="muted small">${esc(d.sku)} · ${esc(d.ip)}</div></div><span class="small muted"><i class="dot"></i>Online</span></div><div class="segs">${segs(Array(12).fill(''))}</div><button class="btn${S.blink.has(d.ip) ? ' primary' : ''}" data-act="identify" data-ip="${esc(d.ip)}" aria-pressed="${S.blink.has(d.ip)}">${S.blink.has(d.ip) ? 'Stop blinking' : 'Identify (blink)'}</button></article>`).join('')
+  <div class="grid">${S.devices.map((d) => `<article class="card"><div class="split"><div><input class="title" style="width:100%" aria-label="Light name" value="${esc(devName(d))}" placeholder="${esc(d.sku)}" data-in="dname" data-dev="${esc(d.device)}"><div class="muted small">${esc(d.sku)} · ${esc(d.ip)}</div><label class="row muted small" style="margin-top:6px">Max segments <input class="num" type="number" min="1" max="84" value="${lightSegs(d)}" data-in="lsegs" data-dev="${esc(d.device)}" title="The most colours this light accepts per frame. Too high and it goes dark during scenes."></label></div><span class="small muted"><i class="dot"></i>Online</span></div><div class="segs">${segs(Array(12).fill(''))}</div><button class="btn${S.blink.has(d.ip) ? ' primary' : ''}" data-act="identify" data-ip="${esc(d.ip)}" aria-pressed="${S.blink.has(d.ip)}">${S.blink.has(d.ip) ? 'Stop blinking' : 'Identify (blink)'}</button></article>`).join('')
     || `<article class="card"><span class="muted">${esc(S.msg || (S.scanning ? 'Looking for lights…' : 'No lights found. Turn on LAN Control for each light in the Govee Home app, then scan again.'))}</span></article>`}</div>
   <h2 class="label">Scenes</h2>
   <div class="grid"><button class="card newtile" data-act="newScene"><span class="plus" aria-hidden="true">+</span>New scene</button>${S.scenes.map((s, i) => `<article class="card"><div class="segs thumb">${segs(colorsAt(s.tracks[0] ?? EMPTY, s.len / 3))}</div>
@@ -534,6 +541,7 @@ document.addEventListener('input', (e) => {
     case 'off': S.off = v; setPref('off', v); $('#offv').textContent = `${v > 0 ? '+' : ''}${v}`; pushSettings(); return;
     case 'smooth': S.smooth = v; setPref('smooth', v); $('#smoothv').textContent = v * 3; if (S.playing) pushShowSoon(); return;
     case 'zoom': setZoom(2 ** v); return;
+    case 'lsegs': if (v < 1 || v > 84) return; S.lsegs[el.dataset.dev] = Math.round(v); setPref('lsegs', JSON.stringify(S.lsegs)); if (S.playing) pushShowSoon(); return;
     case 'dname': if (v.trim()) S.names[el.dataset.dev] = v.trim(); else delete S.names[el.dataset.dev]; setPref('names', JSON.stringify(S.names)); return;
     case 'tdev': s.tracks[S.ti].dev = v; save(); render(); return; // render: refresh the layering note
     case 'tfrom': if (v < 1 || v > 84) return; s.tracks[S.ti].from = Math.round(v) - 1; save(); return;

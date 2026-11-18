@@ -61,11 +61,13 @@ async fn govee_stream(ips: Vec<String>, on: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || lights::set_mode(&ips, on)).await.map_err(|e| e.to_string())
 }
 
-/// Starts a show of `frames` frames at `fps` for these lights (ip, segments); `lights_part` fills it in.
+/// Starts a show of `frames` frames at `fps` for these lights (ip, segments rendered, colours the light
+/// accepts); `lights_part` fills it in.
 #[tauri::command]
-fn lights_load(gen: u64, fps: f64, frames: usize, lights: Vec<(String, usize)>, l: State<Arc<Lights>>) -> Result<(), String> {
+fn lights_load(gen: u64, fps: f64, frames: usize, lights: Vec<(String, usize, usize)>, l: State<Arc<Lights>>) -> Result<(), String> {
     // Bounds keep a bad call from allocating gigabytes: 2 h at 120 fps, 84 segments.
-    if !(1.0..=120.0).contains(&fps) || frames > 120 * 7200 || lights.iter().any(|(_, w)| !(1..=84).contains(w)) {
+    let ok = |n: &usize| (1..=84).contains(n);
+    if !(1.0..=120.0).contains(&fps) || frames > 120 * 7200 || lights.iter().any(|(_, w, m)| !ok(w) || !ok(m)) {
         return Err("Bad light show".into());
     }
     l.load(gen, fps, frames, lights);
