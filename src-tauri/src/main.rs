@@ -69,17 +69,30 @@ fn govee_frame(frames: Vec<(String, Vec<u8>)>) -> Result<(), String> {
     frames.iter().try_for_each(|(ip, rgb)| govee::frame(ip, rgb))
 }
 
-/// Blinks a light three times so you can tell which one it is.
+static BLINKING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Starts or stops blinking a light so you can tell which one it is. Stopping turns it back on.
 #[tauri::command]
-fn govee_identify(ip: String) {
-    std::thread::spawn(move || {
-        for _ in 0..3 {
-            let _ = govee::turn(&ip, false);
-            std::thread::sleep(std::time::Duration::from_millis(350));
-            let _ = govee::turn(&ip, true);
-            std::thread::sleep(std::time::Duration::from_millis(350));
-        }
-    });
+fn govee_identify(ip: String, on: bool) -> Result<(), String> {
+    let mut set = BLINKING.lock().unwrap();
+    let was = set.contains(&ip);
+    set.retain(|x| x != &ip);
+    if !on {
+        return govee::turn(&ip, true);
+    }
+    set.push(ip.clone());
+    if !was {
+        std::thread::spawn(move || {
+            let ms = std::time::Duration::from_millis(400);
+            while BLINKING.lock().unwrap().contains(&ip) {
+                let _ = govee::turn(&ip, false);
+                std::thread::sleep(ms);
+                let _ = govee::turn(&ip, true);
+                std::thread::sleep(ms);
+            }
+        });
+    }
+    Ok(())
 }
 
 #[tauri::command]

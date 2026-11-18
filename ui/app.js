@@ -18,7 +18,7 @@ const demo = () => ({ name: 'Demo scene', len: 60, bpm: 120, tracks: [
   { name: 'Neon', segs: 12, clips: [{ fx: 'Gradient', start: 0, len: 24, hue: 260 }, { fx: 'Strobe', start: 40, len: 4, hue: 0 }] },
 ] });
 
-const S = { page: 'home', devices: [], scanning: false, msg: '', scenes: [demo()], cur: 0, sel: null, t: 0, playing: false, snap: true, bri: 100, black: false, noSave: false, an: null, anPath: '', loading: '', zoom: 1, ti: 0 };
+const S = { page: 'home', devices: [], scanning: false, msg: '', scenes: [demo()], cur: 0, sel: null, t: 0, playing: false, snap: true, bri: 100, black: false, noSave: false, an: null, anPath: '', loading: '', zoom: 1, ti: 0, blink: new Set() };
 const sc = () => S.scenes[S.cur];
 const beat = () => 60 / (S.an?.bpm || sc().bpm);
 // Fractional beat index at time t, from the detected beat grid when there is one.
@@ -101,7 +101,7 @@ const V = {
   <div class="head"><div><h1>Your lights</h1><p class="muted">Build scenes on a timeline, sync them to music, play them live.</p></div>
     <div class="row"><button class="btn" data-act="scan" ${S.scanning ? 'disabled' : ''}>${S.scanning ? 'Scanning…' : 'Scan network'}</button></div></div>
   <h2 class="label">Devices</h2>
-  <div class="grid">${S.devices.map((d) => `<article class="card"><div class="split"><div><strong>${esc(d.sku)}</strong><div class="muted small">${esc(d.ip)}</div></div><span class="small muted"><i class="dot"></i>Online</span></div><div class="segs">${segs(Array(12).fill(''))}</div><button class="btn" data-act="identify" data-ip="${esc(d.ip)}">Identify (blink)</button></article>`).join('')
+  <div class="grid">${S.devices.map((d) => `<article class="card"><div class="split"><div><strong>${esc(d.sku)}</strong><div class="muted small">${esc(d.ip)}</div></div><span class="small muted"><i class="dot"></i>Online</span></div><div class="segs">${segs(Array(12).fill(''))}</div><button class="btn${S.blink.has(d.ip) ? ' primary' : ''}" data-act="identify" data-ip="${esc(d.ip)}" aria-pressed="${S.blink.has(d.ip)}">${S.blink.has(d.ip) ? 'Stop blinking' : 'Identify (blink)'}</button></article>`).join('')
     || `<article class="card"><span class="muted">${esc(S.msg || (S.scanning ? 'Looking for lights…' : 'No lights found. Turn on LAN Control for each light in the Govee Home app, then scan again.'))}</span></article>`}</div>
   <h2 class="label">Scenes</h2>
   <div class="grid"><button class="card newtile" data-act="newScene"><span class="plus" aria-hidden="true">+</span>New scene</button>${S.scenes.map((s, i) => `<article class="card"><div class="segs thumb">${segs(colorsAt(s.tracks[0] ?? EMPTY, s.len / 3))}</div>
@@ -311,6 +311,7 @@ const save = () => {
 window.__TAURI__?.window.getCurrentWindow().onCloseRequested(async () => {
   if (saveT) { clearTimeout(saveT); await flush(); }
   if (S.playing) await invoke('govee_stream', { ips: streamIps, on: false }).catch(() => {});
+  for (const ip of S.blink) await invoke('govee_identify', { ip, on: false }).catch(() => {}); // never leave a light off
 });
 
 function open(i, page = 'editor') {
@@ -352,7 +353,12 @@ const A = {
   track: (d) => { S.ti = +d.ti; S.sel = null; render(); },
   zoom: (d) => setZoom(S.zoom * (+d.z > 0 ? 1.5 : 1 / 1.5)),
   fit: () => setZoom(1),
-  identify: (d) => invoke('govee_identify', { ip: d.ip }),
+  identify: (d) => {
+    const on = !S.blink.has(d.ip);
+    if (on) S.blink.add(d.ip); else S.blink.delete(d.ip);
+    invoke('govee_identify', { ip: d.ip, on }).catch((err) => { $('#status').textContent = String(err); });
+    render();
+  },
   del: () => { if (!clip()) return; sc().tracks[S.sel.ti].clips.splice(S.sel.ci, 1); S.sel = null; save(); render(); },
   black: () => { S.black = !S.black; render(); },
 };
