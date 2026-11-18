@@ -35,7 +35,7 @@ struct Vis {
     laser: f32,         // treble hit strength
     at: f32,            // where the treble sits (0 low .. 1 high): a sweeping sound moves it
 }
-const GROUPS: usize = 6;
+const GROUPS: usize = SPEC; // one section per spectrum band
 const DROP: f32 = 0.12; // loudness jump (0..1) that counts as a drop
 
 impl Ctx<'_> {
@@ -69,7 +69,7 @@ impl Ctx<'_> {
         if sum > 0.0 {
             v.at = hi.clone().map(|k| sp(f, k) * (k - hi.start) as f32).sum::<f32>() / sum / (hi.len() - 1) as f32;
         }
-        v.laser = v.hit[GROUPS - 1].max(v.hit[GROUPS - 2]);
+        v.laser = v.hit[GROUPS * 3 / 4..].iter().copied().fold(0.0, f32::max);
         v
     }
 
@@ -188,7 +188,7 @@ fn clip_colors(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
                 "Visualizer" => {
                     let (v, hue) = vis.as_ref().unwrap();
                     let g = ((x * GROUPS as f32) as usize).min(GROUPS - 1);
-                    let sec = lvl(hsl(hue + g as f32 * 60.0, 100.0, 50.0), 0.04 + 0.96 * v.hit[g]);
+                    let sec = lvl(hsl(hue + g as f32 * (300.0 / GROUPS as f32), 100.0, 50.0), v.hit[g].powf(0.7)); // dark until hit
                     let beam = lvl([255.0; 3], (1.0 - (x - v.at).abs() * 10.0).max(0.0) * v.laser);
                     mix(screen(Some(sec), Some(beam)).unwrap(), [255.0; 3], v.flash)
                 }
