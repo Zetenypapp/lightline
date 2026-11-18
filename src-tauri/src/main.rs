@@ -32,7 +32,7 @@ async fn load_audio(path: String, player: State<'_, Arc<Player>>) -> Result<serd
         drop(mono);
         let duration = track.pcm.len() as f64 / 2.0 / track.rate as f64;
         player.set(track);
-        Ok(json!({ "duration": duration, "bpm": a.bpm, "beats": a.beats, "downbeats": a.downbeats, "fps": a.fps, "bands": a.bands }))
+        Ok(json!({ "duration": duration, "bpm": a.bpm, "beats": a.beats, "downbeats": a.downbeats, "fps": a.fps, "lag": a.lag, "bands": a.bands }))
     })
     .await
     .map_err(|e| e.to_string())?

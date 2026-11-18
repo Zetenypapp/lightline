@@ -37,7 +37,7 @@ function snap(s) {
   if (!b?.length) return Math.round(s / beat()) * beat();
   return b[Math.max(0, Math.min(b.length - 1, Math.round(beatPos(s))))];
 }
-const band = (t, k) => (S.an ? (S.an.bands[Math.floor(t * S.an.fps) * 3 + k] ?? 0) / 255 : 0.5);
+const band = (t, k) => (S.an ? (S.an.bands[Math.floor((t - S.an.lag) * S.an.fps) * 3 + k] ?? 0) / 255 : 0.5);
 const clip = () => S.sel && sc().tracks[S.sel.ti]?.clips[S.sel.ci];
 const pct = (s) => `${(s / sc().len) * 100}%`;
 const EMPTY = { segs: 12, clips: [] };
@@ -156,9 +156,11 @@ const inspector = (c) => `<h2 class="label">Clip</h2><div><strong style="font-si
 const trackPanel = () => {
   const tr = sc().tracks[S.ti]; if (!tr) return '';
   const offline = tr.dev && !S.devices.some((d) => d.device === tr.dev);
+  const total = tr.dev ? sc().tracks.filter((x) => x.dev === tr.dev).reduce((n, x) => n + x.segs, 0) : 0;
   return `<h2 class="label" style="margin-top:8px">Track · ${esc(tr.name)}</h2>
 <label class="field">Light<select data-in="tdev"><option value="">None (preview only)</option>${S.devices.map((d) => `<option value="${esc(d.device)}"${d.device === tr.dev ? ' selected' : ''}>${esc(d.sku)} · ${esc(d.ip)}</option>`).join('')}${offline ? `<option value="${esc(tr.dev)}" selected>Light not found</option>` : ''}</select></label>
 <label class="field">Segments<input type="number" min="1" max="84" value="${tr.segs}" data-in="tsegs"></label>
+${total > 84 ? `<p class="warn small">This light gets ${total} segments from its tracks, but takes at most 84. Segments after 84 are cut off.</p>` : ''}
 <p class="muted small">Tracks on the same light are chained in order: three 5-segment tracks = three zones of a 15-segment strip.</p>`;
 };
 
@@ -277,7 +279,12 @@ async function ensureAudio() {
   if (!a) { S.an = null; return true; }
   if (S.an && S.anPath === a.path) return true;
   S.an = null; S.loading = 'Analysing music…'; render();
-  try { S.an = await invoke('load_audio', { path: a.path }); S.anPath = a.path; S.loading = ''; }
+  try {
+    const an = await invoke('load_audio', { path: a.path });
+    // Another load finished meanwhile and the player may hold the wrong song: load the open scene's again.
+    if (sc().audio?.path !== a.path) { S.an = null; return ensureAudio(); }
+    S.an = an; S.anPath = a.path; S.loading = '';
+  }
   catch (err) { S.loading = `Couldn't load music: ${err}`; }
   render();
   return !!S.an;
@@ -293,16 +300,24 @@ async function importAudio(path) {
 }
 
 let saveT = 0;
+const flush = () => { saveT = 0; return invoke('save_scenes', { json: JSON.stringify(S.scenes) }).catch((err) => { $('#status').textContent = `Save failed: ${err}`; }); };
 const save = () => {
   if (S.noSave) return;
   clearTimeout(saveT);
-  saveT = setTimeout(() => invoke('save_scenes', { json: JSON.stringify(S.scenes) }).catch((err) => { $('#status').textContent = `Save failed: ${err}`; }), 400);
+  saveT = setTimeout(flush, 400);
 };
+
+// Before the window closes: write any pending save and hand the lights back.
+window.__TAURI__?.window.getCurrentWindow().onCloseRequested(async () => {
+  if (saveT) { clearTimeout(saveT); await flush(); }
+  if (S.playing) await invoke('govee_stream', { ips: streamIps, on: false }).catch(() => {});
+});
 
 function open(i, page = 'editor') {
   clearInterval(timer);
   if (S.playing) { stream(false); if (S.an) invoke('audio_pause'); }
   Object.assign(S, { cur: i, t: 0, sel: null, ti: 0, page, playing: false });
+  if (sc().audio?.path !== S.anPath) S.an = null; // never show or play another scene's song
 }
 
 async function scan() {
@@ -356,7 +371,7 @@ document.addEventListener('input', (e) => {
     case 'snap': S.snap = v; return;
     case 'zoom': setZoom(2 ** v); return;
     case 'tdev': s.tracks[S.ti].dev = v; save(); return;
-    case 'tsegs': if (v < 1 || v > 84) return; s.tracks[S.ti].segs = Math.round(v); paint(); save(); return;
+    case 'tsegs': if (v < 1 || v > 84) return; s.tracks[S.ti].segs = Math.round(v); paint(); save(); return; // warning updates on next render
     case 'bri': S.bri = v; $('#briv').textContent = v; $('#stage').style.filter = `brightness(${v}%)`; return;
     case 'name': s.name = v; save(); return;
     case 'tname': s.tracks[+el.dataset.ti].name = v; save(); return;

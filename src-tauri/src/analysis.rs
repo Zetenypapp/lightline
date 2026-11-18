@@ -12,6 +12,8 @@ pub struct Analysis {
     pub beats: Vec<f64>,
     pub downbeats: Vec<f64>,
     pub fps: f64,
+    /// Seconds from a frame's start to its window centre: band frame = (t - lag) * fps.
+    pub lag: f64,
     /// Per frame: bass, mid, high, each 0..255.
     pub bands: Vec<u8>,
 }
@@ -19,9 +21,11 @@ pub struct Analysis {
 pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
     let srf = sr as f64;
     let fps = srf / HOP as f64;
+    let lag = (N / 2) as f64 / srf;
     let frames = if mono.len() > N { (mono.len() - N) / HOP + 1 } else { 0 };
-    if frames < 16 {
-        return Analysis { bpm: 120.0, beats: vec![], downbeats: vec![], fps, bands: vec![] };
+    // Under 2 s there is too little to find a tempo (and the lag search would underflow).
+    if frames < (fps * 2.0) as usize {
+        return Analysis { bpm: 120.0, beats: vec![], downbeats: vec![], fps, lag, bands: vec![] };
     }
 
     let win: Vec<f32> = (0..N)
@@ -103,7 +107,7 @@ pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
         }
     }
 
-    Analysis { bpm: (bpm * 10.0).round() / 10.0, beats, downbeats, fps, bands }
+    Analysis { bpm: (bpm * 10.0).round() / 10.0, beats, downbeats, fps, lag, bands }
 }
 
 /// Removes the slow trend (moving average over ~0.5 s), keeps rises, scales to unit std.
@@ -185,6 +189,14 @@ fn phase_score(bass: &[f32], beats: &[usize], k: usize) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn short_audio_does_not_crash() {
+        for secs in [0.1, 0.4, 0.6, 1.9] {
+            let a = super::analyze(&vec![0.1; (22050.0 * secs) as usize], 22050);
+            assert!(a.beats.is_empty());
+        }
+    }
+
     #[test]
     fn finds_tempo_beats_and_downbeats_of_a_click_track() {
         let sr = 22050u32;
