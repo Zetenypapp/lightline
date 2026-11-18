@@ -675,11 +675,12 @@ impl App {
             let pulse = 1.0 - self.cx().beat_pos(self.t).rem_euclid(1.0) as f32;
             ui.label(RichText::new("●").color(ACCENT.gamma_multiply(0.25 + 0.75 * pulse)));
             ui.label(RichText::new(format!("{} BPM · {} beats", an.bpm, an.beats.len())).color(ACCENT));
-            let an = an.clone();
-            if ui.button("Auto show").on_hover_text("Make a new scene from this song: calm parts calm, drops busy and colourful").clicked() {
+            if ui.button("Auto show").on_hover_text("New scene with the Visualizer on every track: drops go full white, sections blink on what they hear").clicked() {
                 let mut s = self.sc().clone();
                 s.name = format!("{} (auto)", s.name);
-                crate::auto::fill(&an, s.len, &mut s.tracks);
+                for (k, tr) in s.tracks.iter_mut().enumerate() {
+                    tr.clips = vec![Clip { fx: "Visualizer".into(), start: 0.0, len: s.len, col: [0; 3], col2: [0; 3], bri: 100.0, speed: 1.0, rev: k % 2 == 1, fin: 0.0, fout: 0.0 }];
+                }
                 self.scenes.push(s);
                 self.dirty = true;
                 self.open(ctx, self.scenes.len() - 1, Page::Editor);

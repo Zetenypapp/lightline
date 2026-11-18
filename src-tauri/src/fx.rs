@@ -6,8 +6,8 @@ use std::collections::HashMap;
 
 pub type Rgb = [f32; 3];
 
-pub const EFFECTS: [&str; 16] = [
-    "Solid", "Gradient", "Chase", "Pulse", "Breathe", "Wave", "Comet", "Sparkle", "Fire", "Alternate", "Beat flash", "Strobe", "Rainbow", "Bass hit", "Spectrum", "Meter",
+pub const EFFECTS: [&str; 17] = [
+    "Solid", "Gradient", "Chase", "Pulse", "Breathe", "Wave", "Comet", "Sparkle", "Fire", "Alternate", "Beat flash", "Strobe", "Rainbow", "Bass hit", "Spectrum", "Meter", "Visualizer",
 ];
 
 /// Starting colours for effects that need specific ones.
@@ -28,7 +28,51 @@ pub struct Ctx<'a> {
     pub bpm: f64,
 }
 
+/// What the visualizer hears at one moment.
+struct Vis {
+    hit: [f32; GROUPS], // how hard each section's sound just hit, 0..1
+    flash: f32,         // drop: sudden jump in loudness, 0..1
+    laser: f32,         // treble hit strength
+    at: f32,            // where the treble sits (0 low .. 1 high): a sweeping sound moves it
+}
+const GROUPS: usize = 6;
+const DROP: f32 = 0.12; // loudness jump (0..1) that counts as a drop
+
 impl Ctx<'_> {
+    fn vis(&self, t: f64) -> Vis {
+        let mut v = Vis { hit: [0.0; GROUPS], flash: 0.0, laser: 0.0, at: 0.5 };
+        let Some(a) = self.an.filter(|a| !a.spec.is_empty()) else { return v };
+        let nf = (a.spec.len() / SPEC).min(a.bands.len() / 3);
+        let Some(f) = self.frame(a, t).filter(|&f| f < nf) else { return v };
+        let sp = |g: usize, k: usize| a.spec[g * SPEC + k] as f32 / 255.0;
+        let fr = |s: f64| ((s * a.fps).round() as usize).max(1);
+        // Hit = how far a section's level jumped above its last 0.3 s, held and fading over 0.15 s.
+        let (w, d) = (fr(0.3), fr(0.15));
+        for (gi, h) in v.hit.iter_mut().enumerate() {
+            let ks = gi * SPEC / GROUPS..(gi + 1) * SPEC / GROUPS;
+            let lvl = |g: usize| ks.clone().map(|k| sp(g, k)).sum::<f32>() / ks.len() as f32;
+            for back in 0..d.min(f) {
+                let g = f - back;
+                let lo = g.saturating_sub(w);
+                let avg = (lo..g).map(lvl).sum::<f32>() / (g - lo) as f32;
+                *h = h.max(((lvl(g) - avg) * 4.0).clamp(0.0, 1.0) * (1.0 - back as f32 / d as f32));
+            }
+        }
+        // Drop = the last 0.15 s much louder than the 4 s before; fades as the song settles at the new level.
+        let loud = |r: std::ops::Range<usize>| r.clone().map(|g| a.bands[g * 3..g * 3 + 3].iter().map(|&b| b as f32).sum::<f32>()).sum::<f32>() / (r.len() * 3 * 255).max(1) as f32;
+        if f > fr(4.0) {
+            let (fast, slow) = (loud(f - fr(0.15)..f + 1), loud(f - fr(4.0)..f - fr(0.5)));
+            v.flash = ((fast - slow - DROP) * 4.0).clamp(0.0, 1.0);
+        }
+        let hi = SPEC / 2..SPEC;
+        let sum: f32 = hi.clone().map(|k| sp(f, k)).sum();
+        if sum > 0.0 {
+            v.at = hi.clone().map(|k| sp(f, k) * (k - hi.start) as f32).sum::<f32>() / sum / (hi.len() - 1) as f32;
+        }
+        v.laser = v.hit[GROUPS - 1].max(v.hit[GROUPS - 2]);
+        v
+    }
+
     fn beat(&self) -> f64 {
         60.0 / self.an.map(|a| a.bpm).filter(|b| *b > 0.0).unwrap_or(self.bpm).max(1.0)
     }
@@ -114,6 +158,7 @@ fn clip_colors(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
     let fade_in = if c.fin > 0.0 { (t - c.start) / c.fin } else { 1.0 };
     let fade_out = if c.fout > 0.0 { (c.start + c.len - t) / c.fout } else { 1.0 };
     let env = (c.bri / 100.0 * fade_in.min(fade_out).min(1.0)).max(0.0) as f32;
+    let vis = (c.fx == "Visualizer").then(|| (cx.vis(t), cx.beat_pos(t).floor() as f32 * 47.0));
     (0..n)
         .map(|j| {
             let i = if c.rev { n - 1 - j } else { j };
@@ -140,6 +185,13 @@ fn clip_colors(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
                 "Bass hit" => lvl(a, cx.band(t, 0)),
                 "Spectrum" => lvl(mix(a, b2, x), cx.spec(t, x).powf(1.5)), // ^1.5: quiet bands drop out, peaks pop
                 "Meter" => if x <= (cx.band(t, 0) + cx.band(t, 1) + cx.band(t, 2)) / 3.0 { mix(a, b2, x) } else { [0.0; 3] },
+                "Visualizer" => {
+                    let (v, hue) = vis.as_ref().unwrap();
+                    let g = ((x * GROUPS as f32) as usize).min(GROUPS - 1);
+                    let sec = lvl(hsl(hue + g as f32 * 60.0, 100.0, 50.0), 0.04 + 0.96 * v.hit[g]);
+                    let beam = lvl([255.0; 3], (1.0 - (x - v.at).abs() * 10.0).max(0.0) * v.laser);
+                    mix(screen(Some(sec), Some(beam)).unwrap(), [255.0; 3], v.flash)
+                }
                 _ => a,
             };
             o.map(|v| (v * env).clamp(0.0, 255.0))
@@ -258,4 +310,27 @@ mod tests {
         raw.step("b", &[Some([255.0, 0.0, 0.0])], 0.0, 0.0);
         assert_eq!(raw.step("b", &[Some([0.0; 3])], 33.0, 0.0)[0].unwrap()[0], 0.0);
     }
+}
+
+/// Prints what the visualizer does on a real song: SONG=path FROM=secs cargo test vis_on_song -- --ignored --nocapture
+#[test]
+#[ignore]
+fn vis_on_song() {
+    let path = std::env::var("SONG").unwrap();
+    let from: f64 = std::env::var("FROM").map_or(60.0, |v| v.parse().unwrap());
+    let (track, mono) = crate::audio::decode(std::path::Path::new(&path)).unwrap();
+    let an = crate::analysis::analyze(&mono, track.rate);
+    let cx = Ctx { an: Some(&an), bpm: 120.0 };
+    let clip = Clip { fx: "Visualizer".into(), start: 0.0, len: 999.0, col: [0; 3], col2: [0; 3], bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0 };
+    let mut flashes = 0;
+    for i in 0..(mono.len() as f64 / track.rate as f64 * 20.0) as usize {
+        let t = i as f64 / 20.0;
+        let v = cx.vis(t);
+        if v.flash > 0.5 { flashes += 1; }
+        if t >= from && t < from + 12.0 {
+            let row: String = clip_colors(&clip, 48, t, &cx).iter().map(|c| [' ', '.', ':', '*', '#'][((c[0] + c[1] + c[2]) / 3.0 / 52.0) as usize]).collect();
+            println!("{t:6.2} |{row}| flash {:.2} hits {:?}", v.flash, v.hit.map(|h| (h * 9.0) as u8));
+        }
+    }
+    println!("frames with drop flash: {flashes} of {}", (mono.len() as f64 / track.rate as f64 * 20.0) as usize);
 }
