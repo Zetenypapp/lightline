@@ -1,4 +1,4 @@
-//! Drives the lights on its own thread at a fixed 30 Hz, following the audio clock, rendering each
+//! Drives the lights on its own thread at a fixed 60 Hz (30 Hz for lights that can't keep up), following the audio clock, rendering each
 //! frame from the scene with the same effect code as the preview.
 
 use crate::analysis::Analysis;
@@ -9,13 +9,14 @@ use crate::scene::Track;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const SEND_HZ: f64 = 30.0;
+const SEND_HZ: f64 = 60.0;
 
 /// What one light plays: its tracks, and the most colours per frame it accepts.
 #[derive(Clone)]
 pub struct Output {
     pub ip: String,
     pub max: usize,
+    pub fast: bool, // measured to keep up with 60 frames/s; others get every 2nd frame
     pub tracks: Vec<Track>,
 }
 
@@ -110,13 +111,16 @@ impl Lights {
         } else {
             vec![]
         };
+        let s_ticks = s.ticks;
         let State { show, sm, .. } = &mut *s;
         let cx = Ctx { an: show.an.as_deref(), bpm: show.bpm };
         let k = if show.black { 0.0 } else { show.bri as f32 };
         let ms = epoch.elapsed().as_secs_f64() * 1000.0;
+        let even = s_ticks % 2 == 0;
         let frames: Vec<(String, Vec<u8>)> = show
             .outputs
             .iter()
+            .filter(|o| o.fast || even)
             .map(|o| {
                 let cols = sm.step(&o.ip, &fx::light_colors(&o.tracks, t - show.off, &cx), ms, show.smooth);
                 let rgb: Vec<u8> = cols.iter().flat_map(|c| c.unwrap_or([0.0; 3]).map(|v| (v * k).round() as u8)).collect();
@@ -184,4 +188,37 @@ mod tests {
         assert_eq!(stretch(&[1, 2, 3, 4, 5, 6, 7, 8, 9], 1), vec![1, 2, 3]);
         assert_eq!(stretch(&[7, 8, 9], 84).len(), 84 * 3);
     }
+}
+
+/// On-light rate check: every frame toggles the whole strip on/off, so the flicker rate shows how many
+/// frames per second the light really displays. Red 30, green 60, blue 120 frames/s, 4 s each.
+#[test]
+#[ignore]
+fn rate_check() {
+    let lights = [("192.168.0.120", 24usize), ("192.168.0.166", 84)];
+    let ips: Vec<String> = lights.iter().map(|l| l.0.to_string()).collect();
+    set_mode(&ips, true);
+    for _ in 0..6 {
+        for ip in &ips {
+            let _ = govee::stream_mode(ip, true);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    for (hz, col) in [(30.0, [255u8, 0, 0]), (60.0, [0, 255, 0]), (120.0, [0, 0, 255])] {
+        let (t0, period) = (Instant::now(), Duration::from_secs_f64(1.0 / hz));
+        let (mut next, mut on) = (Instant::now(), false);
+        while t0.elapsed() < Duration::from_secs(4) {
+            on = !on;
+            for (ip, n) in lights {
+                let _ = govee::frame(ip, &[if on { col } else { [0, 0, 0] }].repeat(n).concat());
+            }
+            next += period;
+            std::thread::sleep(next.saturating_duration_since(Instant::now()));
+        }
+        for (ip, n) in lights {
+            let _ = govee::frame(ip, &vec![0; n * 3]);
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    set_mode(&ips, false);
 }

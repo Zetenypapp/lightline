@@ -29,6 +29,8 @@ const ROW_H: f32 = 46.0;
 /// Most colours per frame a light accepts (more and it rejects the frame and goes dark), measured on the
 /// user's lights. Other models start at their Govee-app segment count.
 const SEG_MEASURED: [(&str, usize); 3] = [("H61F6", 84), ("H619C", 24), ("H6609", 10)];
+/// Lights seen keeping up with 60+ frames/s (H61F6 can't; unknown models get 30).
+const FAST_MEASURED: [&str; 1] = ["H619C"];
 
 #[derive(PartialEq, Clone, Copy)]
 enum Page {
@@ -306,7 +308,7 @@ impl App {
             let Some(d) = tr.dev.as_ref().and_then(|id| self.devices.iter().find(|d| &d.id == id)) else { continue };
             match outputs.iter_mut().find(|o| o.ip == d.ip) {
                 Some(o) => o.tracks.push(tr.clone()),
-                None => outputs.push(Output { ip: d.ip.clone(), max: self.light_segs(d), tracks: vec![tr.clone()] }),
+                None => outputs.push(Output { ip: d.ip.clone(), max: self.light_segs(d), fast: FAST_MEASURED.contains(&d.sku.as_str()), tracks: vec![tr.clone()] }),
             }
         }
         for o in &mut outputs {
