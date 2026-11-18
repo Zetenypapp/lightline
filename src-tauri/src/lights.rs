@@ -226,8 +226,8 @@ mod tests {
 #[test]
 #[ignore]
 fn rate_check() {
-    // LIGHTS="ip:colours,..." picks the lights and frame size; default: the H619C and H61F6 at full size.
-    let spec = std::env::var("LIGHTS").unwrap_or("192.168.0.120:24,192.168.0.166:84".into());
+    // LIGHTS="ip:colours,..." picks the lights and frame size; required.
+    let spec = std::env::var("LIGHTS").expect("LIGHTS=ip:colours,... (e.g. 192.168.1.20:40)");
     let lights: Vec<(&str, usize)> = spec.split(',').map(|l| l.split_once(':').map(|(ip, n)| (ip, n.parse().unwrap())).unwrap()).collect();
     let ips: Vec<String> = lights.iter().map(|l| l.0.to_string()).collect();
     set_mode(&ips, true);
@@ -263,7 +263,7 @@ fn rate_check() {
 #[test]
 #[ignore]
 fn max_colours() {
-    let ip = std::env::var("LIGHT").unwrap_or("192.168.0.120".into());
+    let ip = std::env::var("LIGHT").expect("LIGHT=ip of the light");
     set_mode(&[ip.clone()], true);
     for _ in 0..6 {
         let _ = govee::stream_mode(&ip, true);
