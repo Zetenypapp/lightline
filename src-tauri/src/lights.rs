@@ -195,7 +195,9 @@ mod tests {
 #[test]
 #[ignore]
 fn rate_check() {
-    let lights = [("192.168.0.120", 24usize), ("192.168.0.166", 84)];
+    // LIGHTS="ip:colours,..." picks the lights and frame size; default: the H619C and H61F6 at full size.
+    let spec = std::env::var("LIGHTS").unwrap_or("192.168.0.120:24,192.168.0.166:84".into());
+    let lights: Vec<(&str, usize)> = spec.split(',').map(|l| l.split_once(':').map(|(ip, n)| (ip, n.parse().unwrap())).unwrap()).collect();
     let ips: Vec<String> = lights.iter().map(|l| l.0.to_string()).collect();
     set_mode(&ips, true);
     for _ in 0..6 {
@@ -209,13 +211,13 @@ fn rate_check() {
         let (mut next, mut on) = (Instant::now(), false);
         while t0.elapsed() < Duration::from_secs(4) {
             on = !on;
-            for (ip, n) in lights {
+            for &(ip, n) in &lights {
                 let _ = govee::frame(ip, &[if on { col } else { [0, 0, 0] }].repeat(n).concat());
             }
             next += period;
             std::thread::sleep(next.saturating_duration_since(Instant::now()));
         }
-        for (ip, n) in lights {
+        for &(ip, n) in &lights {
             let _ = govee::frame(ip, &vec![0; n * 3]);
         }
         std::thread::sleep(Duration::from_secs(1));
