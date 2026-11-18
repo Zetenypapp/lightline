@@ -773,7 +773,7 @@ impl App {
                 ui.label(RichText::new("Scenes").color(MUTED).strong());
                 // Cards in rows that fit the window (egui doesn't wrap frames on its own).
                 let gap = ui.spacing().item_spacing.x;
-                let per_row = (((ui.available_width() + gap) / (258.0 + gap)) as usize).max(1);
+                let per_row = (((ui.available_width() + gap) / (290.0 + gap)) as usize).max(1); // card + Copy/Delete buttons
                 let total = self.scenes.len() + 1;
                 for row in 0..total.div_ceil(per_row) {
                 ui.horizontal(|ui| {
