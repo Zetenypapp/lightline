@@ -64,6 +64,17 @@ struct Drag {
 
 type Loaded = (String, Result<(Analysis, f64), String>);
 
+/// Reacting to whatever the PC is playing.
+struct LiveIn {
+    _stream: cpal::Stream,
+    buf: Arc<std::sync::Mutex<Vec<f32>>>,
+    live: crate::live::Live,
+    an: Arc<Analysis>,
+    t0: Instant,
+}
+
+const LIVE_LOOKS: [&str; 10] = ["Visualizer", "Spectrum", "Ripple", "Kick", "Bass VU", "Meter", "Hi-hats", "Glitch", "Snare", "Voice"];
+
 pub struct App {
     player: Arc<Player>,
     lights: Arc<Lights>,
@@ -105,6 +116,10 @@ pub struct App {
     clip_board: Option<Clip>,
     flash: bool,
     build_open: bool,
+    confirm_del: Option<usize>, // scene waiting for a second click on Delete
+    live_in: Option<LiveIn>,
+    live_fx: usize,
+    live_pal: usize, // 0 = rainbow, else PALETTES[live_pal - 1]
     build_opts: show::Opts,
 }
 
@@ -158,6 +173,10 @@ impl App {
             clip_board: None,
             flash: false,
             build_open: false,
+            confirm_del: None,
+            live_in: None,
+            live_fx: 0,
+            live_pal: 0,
             build_opts: show::Opts::default(),
         };
         app.committed = app.scenes.clone();
@@ -329,9 +348,70 @@ impl App {
 
     // ---------- playback ----------
 
+    /// One track per light, playing the chosen live look.
+    fn live_tracks(&self) -> Vec<Track> {
+        let (col, col2, pal) = match self.live_pal {
+            0 => ([0x2f, 0xd8, 0xb4], [0x7c, 0x6c, 0xff], vec![]),
+            p => {
+                let [d, m, a, h] = show::PALETTES[p - 1].1;
+                (m, a, vec![d, m, a, h])
+            }
+        };
+        self.devices.iter().enumerate().map(|(i, d)| Track {
+            name: self.dev_name(d),
+            segs: self.light_segs(d),
+            from: 0,
+            dev: Some(d.id.clone()),
+            clips: vec![Clip { fx: LIVE_LOOKS[self.live_fx].into(), start: 0.0, len: 1e9, col, col2, pal: pal.clone(), rev: i % 2 == 1, ..Default::default() }],
+        }).collect()
+    }
+
+    fn start_live(&mut self) {
+        self.set_playing(false);
+        let buf = Arc::new(std::sync::Mutex::new(vec![]));
+        match audio::capture(buf.clone()) {
+            Ok((stream, rate)) => {
+                let live = crate::live::Live::new(rate);
+                let an = Arc::new(live.an.clone());
+                self.live_in = Some(LiveIn { _stream: stream, buf, live, an, t0: Instant::now() });
+                self.lights.set_show(self.show());
+                self.lights.play(0.0, false);
+            }
+            Err(e) => self.status = format!("Can't listen to the PC audio: {e}"),
+        }
+    }
+
+    fn stop_live(&mut self) {
+        if self.live_in.take().is_some() {
+            let l = self.lights.clone();
+            std::thread::spawn(move || l.stop());
+        }
+    }
+
+    /// Feeds new PC audio into the live analysis and the lights.
+    fn tick_live(&mut self, ctx: &egui::Context) {
+        let Some(l) = self.live_in.as_mut() else { return };
+        let samples = std::mem::take(&mut *l.buf.lock().unwrap());
+        if !samples.is_empty() {
+            l.live.push(&samples);
+            l.an = Arc::new(l.live.an.clone());
+        }
+        self.lights.set_show(self.show());
+        ctx.request_repaint_after(Duration::from_millis(16));
+    }
+
     fn show(&self) -> Show {
+        if let Some(l) = &self.live_in {
+            let mut s = self.show_of(&self.live_tracks());
+            s.an = Some(l.an.clone());
+            return s;
+        }
+        self.show_of(&self.sc().tracks)
+    }
+
+    fn show_of(&self, tracks: &[Track]) -> Show {
         let mut outputs: Vec<Output> = vec![];
-        for tr in &self.sc().tracks {
+        for tr in tracks {
             let Some(d) = tr.dev.as_ref().and_then(|id| self.devices.iter().find(|d| &d.id == id)) else { continue };
             match outputs.iter_mut().find(|o| o.ip == d.ip) {
                 Some(o) => o.tracks.push(tr.clone()),
@@ -354,6 +434,9 @@ impl App {
     }
 
     fn set_playing(&mut self, on: bool) {
+        if on {
+            self.stop_live();
+        }
         if on == self.playing {
             return;
         }
@@ -539,6 +622,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
         self.advance();
+        self.tick_live(&ctx);
         if self.playing {
             self.lights.set_show(self.show()); // edits reach the lights straight away
             ctx.request_repaint_after(Duration::from_millis(16)); // ~60 fps preview, not the monitor's 200 Hz
@@ -714,8 +798,13 @@ impl App {
                             let (r, _) = ui.allocate_exact_size(Vec2::new(226.0, 70.0), Sense::hover());
                             ui.painter().rect_filled(r, 10, BG);
                             segments(ui, r.shrink(10.0), &cols, 1.0, 4.0);
-                            ui.label(RichText::new(&s.name).strong());
-                            ui.label(RichText::new(format!("{} tracks · {}", s.tracks.len(), fmt(s.len))).color(MUTED).small());
+                            let info = format!("{} tracks · {}", s.tracks.len(), fmt(s.len));
+                            let mut name = s.name.clone();
+                            if ui.add(egui::TextEdit::singleline(&mut name).font(egui::TextStyle::Body).frame(Frame::NONE).desired_width(220.0)).changed() {
+                                self.scenes[i].name = name;
+                                self.dirty = true;
+                            }
+                            ui.label(RichText::new(info).color(MUTED).small());
                             ui.horizontal(|ui| {
                                 if ui.button("Edit").clicked() {
                                     self.open(&ctx, i, Page::Editor);
@@ -723,6 +812,21 @@ impl App {
                                 if icon_button(ui, Icon::Play, 34.0, true).on_hover_text("Play").clicked() {
                                     self.open(&ctx, i, Page::Live);
                                     self.play_when_loaded();
+                                }
+                                if ui.button("Copy").on_hover_text("Duplicate this scene").clicked() {
+                                    let mut c = self.scenes[i].clone();
+                                    c.name = format!("{} copy", c.name);
+                                    self.scenes.insert(i + 1, c);
+                                    self.dirty = true;
+                                }
+                                let sure = self.confirm_del == Some(i);
+                                let del = ui.add(egui::Button::new(RichText::new(if sure { "Sure?" } else { "Delete" }).color(if sure { WARN } else { MUTED })));
+                                if del.clicked() {
+                                    if sure {
+                                        self.delete_scene(&ctx, i);
+                                    } else {
+                                        self.confirm_del = Some(i);
+                                    }
                                 }
                             });
                         });
@@ -732,6 +836,18 @@ impl App {
                 }
             });
         });
+    }
+
+    fn delete_scene(&mut self, ctx: &egui::Context, i: usize) {
+        self.confirm_del = None;
+        self.set_playing(false);
+        self.scenes.remove(i);
+        if self.scenes.is_empty() {
+            self.scenes.push(scene::demo());
+        }
+        let cur = if self.cur > i { self.cur - 1 } else { self.cur.min(self.scenes.len() - 1) };
+        self.dirty = true;
+        self.open(ctx, cur, Page::Home);
     }
 
     /// Start playing now, or once the scene's song has loaded.
@@ -1098,7 +1214,11 @@ impl App {
     fn stage(&mut self, ui: &mut Ui, big: bool, max_h: f32) {
         let ms = self.epoch.elapsed().as_secs_f64() * 1000.0;
         let k = if self.black { 0.0 } else { (self.bri / 100.0) as f32 };
-        let rows: Vec<(String, Vec<Option<Rgb>>)> = {
+        let rows: Vec<(String, Vec<Option<Rgb>>)> = if let Some(l) = &self.live_in {
+            let cx = Ctx { an: Some(&l.an), bpm: 120.0 };
+            let t = l.t0.elapsed().as_secs_f64();
+            self.live_tracks().iter().map(|tr| (tr.name.clone(), fx::track_colors(tr, t, &cx))).collect()
+        } else {
             let cx = self.cx();
             self.sc().tracks.iter().map(|tr| (tr.name.clone(), fx::track_colors(tr, self.t, &cx))).collect()
         };
@@ -1143,6 +1263,29 @@ impl App {
             ui.add_space(12.0);
             card_wide(ui, |ui| {
                 ui.label(RichText::new("Controls").color(MUTED).strong());
+                let on = self.live_in.is_some();
+                let b = ui.add_sized([ui.available_width(), 40.0], egui::Button::new(if on { "Stop listening to PC audio" } else { "React to PC audio" }).selected(on));
+                if b.on_hover_text("The lights react to whatever this PC is playing: Spotify, YouTube, games").clicked() {
+                    if on { self.stop_live() } else { self.start_live() }
+                }
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("livefx").selected_text(LIVE_LOOKS[self.live_fx]).show_ui(ui, |ui| {
+                        for (i, n) in LIVE_LOOKS.iter().enumerate() {
+                            ui.selectable_value(&mut self.live_fx, i, *n);
+                        }
+                    });
+                    let name = if self.live_pal == 0 { "Rainbow" } else { show::PALETTES[self.live_pal - 1].0 };
+                    egui::ComboBox::from_id_salt("livepal").selected_text(name).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.live_pal, 0, "Rainbow");
+                        for (i, (n, _)) in show::PALETTES.iter().enumerate() {
+                            ui.selectable_value(&mut self.live_pal, i + 1, *n);
+                        }
+                    });
+                });
+                if let Some(l) = &self.live_in {
+                    ui.label(RichText::new(format!("Listening · {} BPM", l.an.bpm)).color(ACCENT).small());
+                }
+                ui.add_space(6.0);
                 self.output_panel(ui);
                 let fl = ui.add_sized([ui.available_width(), 40.0], egui::Button::new("Flash  (hold F)"));
                 self.flash |= fl.is_pointer_button_down_on();

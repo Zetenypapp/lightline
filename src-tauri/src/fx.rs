@@ -172,7 +172,9 @@ impl Ctx<'_> {
 
     fn frame(&self, a: &Analysis, t: f64) -> Option<usize> {
         let f = ((t - a.lag) * a.fps).floor();
-        (f >= 0.0).then_some(f as usize)
+        let nf = (a.bands.len() / 3).max(1);
+        // Just past the newest frame (live input still arriving): use the newest one.
+        (f >= 0.0).then_some((f as usize).min(if (f as usize) < nf + (a.fps * 0.25) as usize { nf - 1 } else { usize::MAX }))
     }
 
     /// Bass (0), mid (1), high (2) level 0..1.

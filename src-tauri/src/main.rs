@@ -6,6 +6,7 @@ mod audio;
 mod fx;
 mod govee;
 mod lights;
+mod live;
 mod scene;
 mod show;
 

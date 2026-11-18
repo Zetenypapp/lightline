@@ -12,10 +12,11 @@ const LEAD_TONE: f32 = 6.0;
 pub const SPEC: usize = 24;
 
 /// Spectrum band of FFT bin `k` (bins 2..kmax, log scale so every band gets at least one bin).
-fn spec_band(k: usize, kmax: usize) -> Option<usize> {
+pub(crate) fn spec_band(k: usize, kmax: usize) -> Option<usize> {
     (k >= 2 && k < kmax).then(|| (((k as f64 / 2.0).ln() / (kmax as f64 / 2.0).ln()) * SPEC as f64) as usize).map(|b| b.min(SPEC - 1))
 }
 
+#[derive(Clone)]
 pub struct Analysis {
     pub bpm: f64,
     pub beats: Vec<f64>,
@@ -236,7 +237,7 @@ fn to_u8(rows: &[f32], width: usize) -> Vec<u8> {
 }
 
 /// Removes the slow trend (moving average over ~0.5 s), keeps rises, scales to unit std.
-fn normalize(x: &[f32]) -> Vec<f32> {
+pub(crate) fn normalize(x: &[f32]) -> Vec<f32> {
     let w = 20;
     let mut pre = vec![0f64; x.len() + 1];
     for (i, v) in x.iter().enumerate() {
@@ -254,7 +255,7 @@ fn normalize(x: &[f32]) -> Vec<f32> {
 }
 
 /// Frames per beat, from onset autocorrelation weighted toward 120 BPM.
-fn tempo(on: &[f32], fps: f64) -> f64 {
+pub(crate) fn tempo(on: &[f32], fps: f64) -> f64 {
     let ac = |lag: usize| -> f64 {
         let n = on.len() - lag;
         (0..n).map(|i| (on[i] * on[i + lag]) as f64).sum::<f64>() / n as f64
@@ -277,7 +278,7 @@ fn tempo(on: &[f32], fps: f64) -> f64 {
 }
 
 /// Ellis 2007: best chain of onsets spaced about one period apart.
-fn track(on: &[f32], period: f64) -> Vec<usize> {
+pub(crate) fn track(on: &[f32], period: f64) -> Vec<usize> {
     let n = on.len();
     let (lo, hi) = (((period / 2.0).round() as usize).max(1), (period * 2.0).round() as usize);
     let mut score = vec![0f64; n];

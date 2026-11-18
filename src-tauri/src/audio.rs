@@ -122,6 +122,30 @@ impl Player {
     }
 }
 
+/// Records what the PC is playing (loopback of the default output) as mono samples into `buf`.
+/// Returns the stream (keep it alive) and its sample rate.
+pub fn capture(buf: Arc<Mutex<Vec<f32>>>) -> Result<(cpal::Stream, u32), String> {
+    let dev = cpal::default_host().default_output_device().ok_or("No audio output device")?;
+    let cfg = dev.default_output_config().map_err(|e| e.to_string())?;
+    if cfg.sample_format() != cpal::SampleFormat::F32 {
+        return Err(format!("Unsupported audio format {:?}", cfg.sample_format()));
+    }
+    let (ch, rate) = (cfg.channels() as usize, cfg.sample_rate().0);
+    let push = move |d: &[f32], _: &cpal::InputCallbackInfo| {
+        if let Ok(mut b) = buf.lock() {
+            b.extend(d.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32));
+            let max = rate as usize * 2; // the UI drains it every frame; never let it grow
+            if b.len() > max {
+                let k = b.len() - max;
+                b.drain(..k);
+            }
+        }
+    };
+    let stream = dev.build_input_stream(&cfg.into(), push, |e| eprintln!("capture: {e}"), None).map_err(|e| e.to_string())?;
+    stream.play().map_err(|e| e.to_string())?;
+    Ok((stream, rate))
+}
+
 fn open_stream(p: Arc<Player>) -> Result<cpal::Stream, String> {
     let dev = cpal::default_host().default_output_device().ok_or("no output device")?;
     let cfg = dev.default_output_config().map_err(|e| e.to_string())?;
@@ -164,4 +188,16 @@ fn fill(p: &Player, out: &mut [f32], ch: usize, dev_rate: f64) {
     }
     // A seek during this buffer wins over our advance.
     let _ = p.pos.compare_exchange(start, pos.to_bits(), Relaxed, Relaxed);
+}
+
+/// Records 2 s of PC audio and prints how much came in: cargo test capture_check -- --ignored --nocapture
+#[test]
+#[ignore]
+fn capture_check() {
+    let buf = Arc::new(Mutex::new(vec![]));
+    let (_s, rate) = capture(buf.clone()).unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let b = buf.lock().unwrap();
+    let rms = (b.iter().map(|v| v * v).sum::<f32>() / b.len().max(1) as f32).sqrt();
+    println!("rate {rate}, samples {}, rms {rms:.4}", b.len());
 }
