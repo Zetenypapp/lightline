@@ -19,7 +19,10 @@ const demo = () => ({ name: 'Demo scene', len: 60, bpm: 120, tracks: [
   { name: 'Neon', segs: 12, clips: [{ fx: 'Gradient', start: 0, len: 24, hue: 260 }, { fx: 'Strobe', start: 40, len: 4, hue: 0 }] },
 ] });
 
-const S = { page: 'home', devices: [], scanning: false, msg: '', scenes: migrate([demo()]), cur: 0, sel: null, t: 0, playing: false, snap: true, bri: 100, black: false, noSave: false, an: null, anPath: '', loading: '', zoom: 1, ti: 0, blink: new Set() };
+const S = { page: 'home', devices: [], scanning: false, msg: '', scenes: migrate([demo()]), cur: 0, sel: null, t: 0, playing: false, snap: true, bri: 100, black: false, noSave: false, an: null, anPath: '', loading: '', zoom: 1, ti: 0, blink: new Set(), off: pref('off', 0), smooth: pref('smooth', 40) };
+// Per-PC settings (light delay, smoothing): fine in browser storage, but it may be unavailable.
+function pref(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : +v; } catch { return d; } }
+function setPref(k, v) { try { localStorage.setItem(k, v); } catch { /* not saved, still applies now */ } }
 const sc = () => S.scenes[S.cur];
 const beat = () => 60 / (S.an?.bpm || sc().bpm);
 // Fractional beat index at time t, from the detected beat grid when there is one.
@@ -106,17 +109,30 @@ function colorsAt(tr, t) {
 const css = (c) => (typeof c === 'string' ? c : `rgb(${c[0]} ${c[1]} ${c[2]})`);
 const segs = (cols) => cols.map((c) => `<i${c ? ` style="background:${css(c)};color:${css(c)}"` : ''}></i>`).join('');
 
+// Glides colour changes so jumps don't look harsh: rises in ~20 ms, falls over the Smoothing time.
+// Time-based, so it looks the same at any frame rate.
+function smoother() {
+  const st = new Map();
+  return (key, cols, now) => {
+    const s = st.get(key);
+    if (!s || s.v.length !== cols.length || !S.playing) { st.set(key, { v: cols.map((c) => c ?? [0, 0, 0]), now }); return cols; }
+    const dt = now - s.now, fall = S.smooth * 3, up = fall ? 1 - Math.exp(-dt / 20) : 1, down = fall ? 1 - Math.exp(-dt / fall) : 1;
+    s.now = now;
+    s.v = cols.map((c, i) => (c ?? [0, 0, 0]).map((v, k) => { const o = s.v[i][k]; return o + (v - o) * (v > o ? up : down); }));
+    return s.v.map((c, i) => (!cols[i] && c.every((v) => v < 2) ? null : c.map(Math.round)));
+  };
+}
+const smPreview = smoother(), smLights = smoother();
+
 // Tracks on the same light are chained in track order -> one frame per light.
 function deviceFrames() {
-  const by = new Map(), k = S.bri / 100;
+  const by = new Map(), k = S.bri / 100, now = performance.now(), t = S.t - S.off / 1000;
   for (const tr of sc().tracks) {
     const d = tr.dev && S.devices.find((x) => x.device === tr.dev);
     if (!d) continue;
-    const f = by.get(d.ip) ?? [];
-    for (const c of colorsAt(tr, S.t)) f.push(...(c ? c.map((v) => Math.round(v * k)) : [0, 0, 0]));
-    by.set(d.ip, f);
+    by.set(d.ip, [...(by.get(d.ip) ?? []), ...colorsAt(tr, t)]);
   }
-  return [...by];
+  return [...by].map(([ip, cols]) => [ip, smLights(ip, cols, now).flatMap((c) => (c ? c.map((v) => Math.round(v * k)) : [0, 0, 0]))]);
 }
 let sending = false, streamIps = [];
 function sendFrame() {
@@ -130,7 +146,7 @@ function stream(on) {
   streamIps = on ? ips : [];
   if (ips.length) invoke('govee_stream', { ips, on }).catch((err) => { $('#status').textContent = String(err); });
 }
-const stage = () => sc().tracks.map((tr) => `<div class="pv"><span class="muted small">${esc(tr.name)}</span><div class="segs">${segs(colorsAt(tr, S.t))}</div></div>`).join('') || '<p class="muted">No tracks yet.</p>';
+const stage = (now = performance.now()) => sc().tracks.map((tr, i) => `<div class="pv"><span class="muted small">${esc(tr.name)}</span><div class="segs">${segs(smPreview(i, colorsAt(tr, S.t), now))}</div></div>`).join('') || '<p class="muted">No tracks yet.</p>';
 
 const V = {
   home: () => `<section class="page">
@@ -158,7 +174,7 @@ const V = {
   <div class="panes">
     <aside class="lib"><h2 class="label">Effects</h2><div class="fxgrid">${EFFECTS.map((fx) => `<button class="fxtile" data-act="add" data-fx="${fx}"><span class="segs">${segs(colorsAt({ segs: 8, clips: [{ fx, start: 0, len: 1e9, col: FX_COLORS[fx]?.[0] ?? '#2fd8b4', col2: FX_COLORS[fx]?.[1] ?? '#7c6cff' }] }, 0.7))}</span>${fx}</button>`).join('')}</div><p class="muted small">Click an effect to drop it at the playhead.</p></aside>
     <section class="stage" id="stage" aria-label="Preview">${stage()}</section>
-    <aside class="insp">${c ? inspector(c) : '<h2 class="label">Clip</h2><p class="muted small">Select a clip on the timeline.</p>'}${trackPanel()}</aside>
+    <aside class="insp">${c ? inspector(c) : '<h2 class="label">Clip</h2><p class="muted small">Select a clip on the timeline.</p>'}${trackPanel()}${outputPanel()}</aside>
   </div>
   <section class="tl" aria-label="Timeline">
     <div class="tlhead"><button class="btn" data-act="addTrack">+ Track</button><label class="row muted"><input type="checkbox" data-in="snap" ${S.snap ? 'checked' : ''}>Snap to beat</label>
@@ -178,6 +194,7 @@ const V = {
   <div class="card"><h2 class="label">Scenes</h2>${S.scenes.map((q, i) => `<button class="q" data-act="pick" data-i="${i}" aria-current="${i === S.cur}"><span class="segs">${segs(colorsAt(q.tracks[0] ?? EMPTY, q.len / 3).slice(0, 6))}</span><span><strong>${esc(q.name)}</strong><br><span class="muted small">${fmt(q.len)}</span></span></button>`).join('')}</div>
   <div class="card"><h2 class="label">Controls</h2>
     <label class="field"><span>Master brightness · <b id="briv">${S.bri}</b>%</span><input type="range" min="0" max="100" value="${S.bri}" data-in="bri"></label>
+    ${outputPanel()}
     <button class="btn" data-act="black" aria-pressed="${S.black}">${S.black ? 'Lights back on' : 'Blackout'}</button>
   </div>
 </aside></section>`; },
@@ -192,6 +209,10 @@ const inspector = (c) => `<h2 class="label">Clip</h2><div><strong style="font-si
 <div class="row"><label class="field" style="flex:1">Fade in (s)<input type="number" min="0" step="0.1" value="${c.fin ?? 0}" data-in="fin"></label><label class="field" style="flex:1">Fade out (s)<input type="number" min="0" step="0.1" value="${c.fout ?? 0}" data-in="fout"></label></div>
 <div class="row"><label class="field" style="flex:1">Start (s)<input type="number" min="0" step="0.1" value="${+c.start.toFixed(2)}" data-in="start"></label><label class="field" style="flex:1">Length (s)<input type="number" min="0.1" step="0.1" value="${+c.len.toFixed(2)}" data-in="clen"></label></div>
 <div class="row"><button class="btn" style="flex:1" data-act="dup">Duplicate</button><button class="btn" style="flex:1" data-act="del">Delete</button></div>`;
+
+const outputPanel = () => `<h2 class="label" style="margin-top:8px">Light output</h2>
+<label class="field"><span>Light timing · <b id="offv">${S.off > 0 ? '+' : ''}${S.off}</b> ms <span class="small">(− earlier, + later)</span></span><input type="range" min="-300" max="300" step="5" value="${S.off}" data-in="off"></label>
+<label class="field"><span>Smoothing · <b id="smoothv">${S.smooth * 3}</b> ms fade</span><input type="range" min="0" max="100" value="${S.smooth}" data-in="smooth"></label>`;
 
 const trackPanel = () => {
   const tr = sc().tracks[S.ti]; if (!tr) return '';
@@ -289,10 +310,9 @@ async function setPlaying(on) {
     }
     stream(true);
     last = performance.now();
-    let lastSend = 0;
-    timer = setInterval(async () => { // ~30 fps, not the monitor's refresh rate
+    timer = setInterval(async () => { // ~30 fps for screen and lights, not the monitor's refresh rate
       const now = performance.now();
-      if (now - lastSend >= 50) { lastSend = now; sendFrame(); } // lights get ~20 fps
+      sendFrame();
       if (S.an) { // the audio player is the clock
         const [t, playing] = await invoke('audio_state');
         if (!S.playing) return;
@@ -424,6 +444,8 @@ document.addEventListener('input', (e) => {
   if (typeof v === 'number' && (Number.isNaN(v) || el.value === '')) return;
   switch (k) {
     case 'snap': S.snap = v; return;
+    case 'off': S.off = v; setPref('off', v); $('#offv').textContent = `${v > 0 ? '+' : ''}${v}`; return;
+    case 'smooth': S.smooth = v; setPref('smooth', v); $('#smoothv').textContent = v * 3; return;
     case 'zoom': setZoom(2 ** v); return;
     case 'tdev': s.tracks[S.ti].dev = v; save(); return;
     case 'tsegs': if (v < 1 || v > 84) return; s.tracks[S.ti].segs = Math.round(v); paint(); save(); return; // warning updates on next render
