@@ -39,6 +39,7 @@ enum Page {
     Home,
     Editor,
     Live,
+    React,
 }
 
 #[derive(Clone)]
@@ -633,7 +634,11 @@ impl eframe::App for App {
         // Keyboard: space plays, Delete removes the selected clip.
         if !ctx.egui_wants_keyboard_input() && self.page != Page::Home {
             if ui.input(|i| i.key_pressed(egui::Key::Space)) {
-                self.set_playing(!self.playing);
+                if self.page == Page::React {
+                    if self.live_in.is_some() { self.stop_live() } else { self.start_live() }
+                } else {
+                    self.set_playing(!self.playing);
+                }
             }
             if self.page == Page::Editor && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
                 self.delete_clip();
@@ -680,6 +685,7 @@ impl eframe::App for App {
             Page::Home => self.home(ui),
             Page::Editor => self.editor(ui),
             Page::Live => self.live(ui),
+            Page::React => self.react(ui),
         }
         // Undo history: one step per finished edit (not per frame of a drag).
         if !ctx.input(|i| i.pointer.any_down()) && self.scenes != self.committed {
@@ -717,7 +723,7 @@ impl App {
                 ui.label(RichText::new("Lightline").strong().size(17.0));
                 ui.add_space(16.0);
                 Frame::new().fill(PANEL).corner_radius(255).inner_margin(4).show(ui, |ui| {
-                    for (p, name) in [(Page::Home, "Home"), (Page::Editor, "Editor"), (Page::Live, "Live")] {
+                    for (p, name) in [(Page::Home, "Home"), (Page::Editor, "Editor"), (Page::Live, "Live"), (Page::React, "React")] {
                         if pill(ui, name, self.page == p).clicked() {
                             self.page = p;
                         }
@@ -1214,9 +1220,9 @@ impl App {
     fn stage(&mut self, ui: &mut Ui, big: bool, max_h: f32) {
         let ms = self.epoch.elapsed().as_secs_f64() * 1000.0;
         let k = if self.black { 0.0 } else { (self.bri / 100.0) as f32 };
-        let rows: Vec<(String, Vec<Option<Rgb>>)> = if let Some(l) = &self.live_in {
-            let cx = Ctx { an: Some(&l.an), bpm: 120.0 };
-            let t = l.t0.elapsed().as_secs_f64();
+        let rows: Vec<(String, Vec<Option<Rgb>>)> = if self.live_in.is_some() || self.page == Page::React {
+            let cx = Ctx { an: self.live_in.as_ref().map(|l| &*l.an), bpm: 120.0 };
+            let t = self.live_in.as_ref().map_or(self.epoch.elapsed().as_secs_f64(), |l| l.t0.elapsed().as_secs_f64());
             self.live_tracks().iter().map(|tr| (tr.name.clone(), fx::track_colors(tr, t, &cx))).collect()
         } else {
             let cx = self.cx();
@@ -1263,29 +1269,6 @@ impl App {
             ui.add_space(12.0);
             card_wide(ui, |ui| {
                 ui.label(RichText::new("Controls").color(MUTED).strong());
-                let on = self.live_in.is_some();
-                let b = ui.add_sized([ui.available_width(), 40.0], egui::Button::new(if on { "Stop listening to PC audio" } else { "React to PC audio" }).selected(on));
-                if b.on_hover_text("The lights react to whatever this PC is playing: Spotify, YouTube, games").clicked() {
-                    if on { self.stop_live() } else { self.start_live() }
-                }
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("livefx").selected_text(LIVE_LOOKS[self.live_fx]).show_ui(ui, |ui| {
-                        for (i, n) in LIVE_LOOKS.iter().enumerate() {
-                            ui.selectable_value(&mut self.live_fx, i, *n);
-                        }
-                    });
-                    let name = if self.live_pal == 0 { "Rainbow" } else { show::PALETTES[self.live_pal - 1].0 };
-                    egui::ComboBox::from_id_salt("livepal").selected_text(name).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.live_pal, 0, "Rainbow");
-                        for (i, (n, _)) in show::PALETTES.iter().enumerate() {
-                            ui.selectable_value(&mut self.live_pal, i + 1, *n);
-                        }
-                    });
-                });
-                if let Some(l) = &self.live_in {
-                    ui.label(RichText::new(format!("Listening · {} BPM", l.an.bpm)).color(ACCENT).small());
-                }
-                ui.add_space(6.0);
                 self.output_panel(ui);
                 let fl = ui.add_sized([ui.available_width(), 40.0], egui::Button::new("Flash  (hold F)"));
                 self.flash |= fl.is_pointer_button_down_on();
@@ -1332,6 +1315,62 @@ impl App {
                 }
             });
             ui.add_space(12.0);
+            let stage_h = (ui.available_height() - 16.0).max(120.0);
+            Frame::new().fill(PANEL).corner_radius(14).inner_margin(28).show(ui, |ui| {
+                ui.set_min_size(Vec2::new(ui.available_width(), stage_h));
+                self.stage(ui, true, stage_h - 56.0);
+            });
+        });
+    }
+}
+
+impl App {
+    /// The React tab: the lights follow whatever this PC is playing.
+    fn react(&mut self, ui: &mut Ui) {
+        egui::Panel::right("reactctl").default_size(340.0).frame(Frame::new().fill(BG).inner_margin(16)).show(ui, |ui| {
+            card_wide(ui, |ui| {
+                ui.label(RichText::new("PC audio").color(MUTED).strong());
+                let on = self.live_in.is_some();
+                let b = ui.add_sized([ui.available_width(), 40.0], egui::Button::new(if on { "Stop listening to PC audio" } else { "React to PC audio" }).selected(on));
+                if b.on_hover_text("The lights react to whatever this PC is playing: Spotify, YouTube, games").clicked() {
+                    if on { self.stop_live() } else { self.start_live() }
+                }
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("livefx").selected_text(LIVE_LOOKS[self.live_fx]).show_ui(ui, |ui| {
+                        for (i, n) in LIVE_LOOKS.iter().enumerate() {
+                            ui.selectable_value(&mut self.live_fx, i, *n);
+                        }
+                    });
+                    let name = if self.live_pal == 0 { "Rainbow" } else { show::PALETTES[self.live_pal - 1].0 };
+                    egui::ComboBox::from_id_salt("livepal").selected_text(name).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.live_pal, 0, "Rainbow");
+                        for (i, (n, _)) in show::PALETTES.iter().enumerate() {
+                            ui.selectable_value(&mut self.live_pal, i + 1, *n);
+                        }
+                    });
+                });
+                if let Some(l) = &self.live_in {
+                    ui.label(RichText::new(format!("Listening · {} BPM", l.an.bpm)).color(ACCENT).small());
+                }
+            });
+            ui.add_space(12.0);
+            card_wide(ui, |ui| {
+                ui.label(RichText::new("Controls").color(MUTED).strong());
+                self.output_panel(ui);
+                let fl = ui.add_sized([ui.available_width(), 40.0], egui::Button::new("Flash  (hold F)"));
+                self.flash |= fl.is_pointer_button_down_on();
+                let label = if self.black { "Lights back on  (B)" } else { "Blackout  (B)" };
+                if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(label).selected(self.black)).clicked() {
+                    self.black = !self.black;
+                }
+            });
+        });
+        egui::CentralPanel::default().frame(Frame::new().fill(BG).inner_margin(Margin { left: 24, right: 8, top: 12, bottom: 16 })).show(ui, |ui| {
+            let on = self.live_in.is_some();
+            ui.label(RichText::new(if on { "● Listening" } else { "● Off" }).color(if on { ACCENT } else { MUTED }).strong());
+            ui.label(RichText::new("React to PC audio").size(40.0).strong());
+            ui.label(RichText::new("The lights follow whatever this PC is playing: Spotify, YouTube, games. No scene needed.").color(MUTED));
+            ui.add_space(14.0);
             let stage_h = (ui.available_height() - 16.0).max(120.0);
             Frame::new().fill(PANEL).corner_radius(14).inner_margin(28).show(ui, |ui| {
                 ui.set_min_size(Vec2::new(ui.available_width(), stage_h));
