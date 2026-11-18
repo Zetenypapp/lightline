@@ -61,14 +61,14 @@ pub struct Scene {
 pub struct Settings {
     pub names: HashMap<String, String>, // light id -> name
     pub lsegs: HashMap<String, usize>,  // light id -> most colours it accepts
-    pub ldelay: HashMap<String, f64>,   // light id -> ms it shows frames late (sent that much early)
+    pub loff_ms: HashMap<String, f64>,  // light id -> its own timing, negative = earlier
     pub off_ms: f64,
     pub smooth: f64, // 0..100, fade = smooth * 3 ms
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { names: HashMap::new(), lsegs: HashMap::new(), ldelay: HashMap::new(), off_ms: 0.0, smooth: 40.0 }
+        Settings { names: HashMap::new(), lsegs: HashMap::new(), loff_ms: HashMap::new(), off_ms: 0.0, smooth: 40.0 }
     }
 }
 
