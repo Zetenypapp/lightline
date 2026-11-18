@@ -1,4 +1,4 @@
-//! Drives the lights on its own thread at a fixed 120 Hz (30 Hz for lights that can't keep up), following the audio clock, rendering each
+//! Drives the lights on its own thread at a fixed 120 Hz (24 Hz for lights that can't keep up), following the audio clock, rendering each
 //! frame from the scene with the same effect code as the preview.
 
 use crate::analysis::Analysis;
@@ -16,7 +16,7 @@ const SEND_HZ: f64 = 120.0;
 pub struct Output {
     pub ip: String,
     pub max: usize,
-    pub fast: bool, // measured to keep up with 120 frames/s; others get every 4th frame
+    pub fast: bool, // measured to keep up with 120 frames/s; others get every 5th frame
     pub tracks: Vec<Track>,
 }
 
@@ -116,7 +116,7 @@ impl Lights {
         let cx = Ctx { an: show.an.as_deref(), bpm: show.bpm };
         let k = if show.black { 0.0 } else { show.bri as f32 };
         let ms = epoch.elapsed().as_secs_f64() * 1000.0;
-        let even = s_ticks % 4 == 0; // slow lights: 30 frames/s
+        let even = s_ticks % 5 == 0; // slow lights: 24 frames/s (H61F6 stutters even near 30)
         let frames: Vec<(String, Vec<u8>)> = show
             .outputs
             .iter()
@@ -206,7 +206,9 @@ fn rate_check() {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+    let bri: f32 = std::env::var("BRI").map_or(1.0, |v| v.parse().unwrap()); // BRI=0.25: dim test
     for (hz, col) in [(30.0, [255u8, 0, 0]), (60.0, [0, 255, 0]), (120.0, [0, 0, 255])] {
+        let col = col.map(|v| (v as f32 * bri) as u8);
         let (t0, period) = (Instant::now(), Duration::from_secs_f64(1.0 / hz));
         let (mut next, mut on) = (Instant::now(), false);
         while t0.elapsed() < Duration::from_secs(4) {
