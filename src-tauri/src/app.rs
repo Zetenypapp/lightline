@@ -176,6 +176,11 @@ impl App {
             .unwrap_or(10)
     }
 
+    /// This light's smoothing, else the overall one.
+    fn light_smooth(&self, id: &str) -> f64 {
+        self.settings.lsmooth.get(id).copied().unwrap_or(self.settings.smooth)
+    }
+
     /// All the segments of a light, for a track that just got it.
     fn full_segs(&self, id: &str) -> usize {
         self.devices.iter().find(|d| d.id == id).map_or(15, |d| self.light_segs(d))
@@ -313,7 +318,7 @@ impl App {
             let Some(d) = tr.dev.as_ref().and_then(|id| self.devices.iter().find(|d| &d.id == id)) else { continue };
             match outputs.iter_mut().find(|o| o.ip == d.ip) {
                 Some(o) => o.tracks.push(tr.clone()),
-                None => outputs.push(Output { ip: d.ip.clone(), max: self.light_segs(d), lead: -self.settings.loff_ms.get(&d.id).copied().unwrap_or(0.0) / 1000.0, fast: FAST_MEASURED.contains(&d.sku.as_str()), tracks: vec![tr.clone()] }),
+                None => outputs.push(Output { ip: d.ip.clone(), max: self.light_segs(d), lead: -self.settings.loff_ms.get(&d.id).copied().unwrap_or(0.0) / 1000.0, fast: FAST_MEASURED.contains(&d.sku.as_str()), smooth: self.light_smooth(&d.id), tracks: vec![tr.clone()] }),
             }
         }
         for o in &mut outputs {
@@ -326,7 +331,6 @@ impl App {
             bpm: self.sc().bpm,
             bri: self.bri / 100.0,
             off: self.settings.off_ms / 1000.0,
-            smooth: self.settings.smooth,
             black: self.black,
         }
     }
@@ -617,6 +621,14 @@ impl App {
             ui.label(RichText::new("Timing").color(MUTED));
             if ui.add(egui::DragValue::new(&mut ms).range(-500.0..=500.0).speed(1.0).suffix(" ms")).on_hover_text("Negative = this light gets its colours earlier. Use it to line a slow light up with the others.").changed() {
                 self.settings.loff_ms.insert(id.clone(), ms);
+                self.settings_dirty = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            let mut sm = self.light_smooth(&id);
+            ui.label(RichText::new("Smoothing").color(MUTED));
+            if ui.add(egui::DragValue::new(&mut sm).range(0.0..=100.0).speed(0.5)).on_hover_text("How softly colours fade out on this light. Lower = snappier. Until you change it, it follows the overall smoothing.").changed() {
+                self.settings.lsmooth.insert(id.clone(), sm);
                 self.settings_dirty = true;
             }
         });

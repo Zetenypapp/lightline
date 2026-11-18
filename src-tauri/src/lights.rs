@@ -6,6 +6,7 @@ use crate::audio::Player;
 use crate::fx::{self, Ctx, Smoother};
 use crate::govee;
 use crate::scene::Track;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,7 @@ pub struct Output {
     pub max: usize,
     pub lead: f64, // seconds this light shows frames late; it gets them that much early
     pub fast: bool, // measured to keep up with 120 frames/s; others get every 5th frame
+    pub smooth: f64, // 0..100, this light's fade
     pub tracks: Vec<Track>,
 }
 
@@ -28,7 +30,6 @@ pub struct Show {
     pub bpm: f64,
     pub bri: f64,    // 0..1
     pub off: f64,    // seconds the lights run late (+) or early (-)
-    pub smooth: f64, // 0..100
     pub black: bool,
 }
 
@@ -38,6 +39,7 @@ struct State {
     play: Option<(f64, Instant, bool)>, // start time, started at, follow the audio clock
     ticks: u64,
     sm: Smoother,
+    peak: HashMap<String, Vec<u8>>, // slow lights: brightest colour per segment since their last frame
 }
 
 pub struct Lights {
@@ -46,7 +48,7 @@ pub struct Lights {
 
 impl Lights {
     pub fn start(player: Arc<Player>) -> Arc<Self> {
-        let st = State { show: Show::default(), live: vec![], play: None, ticks: 0, sm: Smoother::default() };
+        let st = State { show: Show::default(), live: vec![], play: None, ticks: 0, sm: Smoother::default(), peak: HashMap::new() };
         let me = Arc::new(Lights { st: Mutex::new(st) });
         let l = me.clone();
         std::thread::spawn(move || {
@@ -113,7 +115,7 @@ impl Lights {
             vec![]
         };
         let s_ticks = s.ticks;
-        let State { show, sm, .. } = &mut *s;
+        let State { show, sm, peak, .. } = &mut *s;
         let cx = Ctx { an: show.an.as_deref(), bpm: show.bpm };
         let k = if show.black { 0.0 } else { show.bri as f32 };
         let ms = epoch.elapsed().as_secs_f64() * 1000.0;
@@ -121,11 +123,22 @@ impl Lights {
         let frames: Vec<(String, Vec<u8>)> = show
             .outputs
             .iter()
-            .filter(|o| o.fast || even)
-            .map(|o| {
-                let cols = sm.step(&o.ip, &fx::light_colors(&o.tracks, t - show.off + o.lead, &cx), ms, show.smooth);
+            .filter_map(|o| {
+                let cols = sm.step(&o.ip, &fx::light_colors(&o.tracks, t - show.off + o.lead, &cx), ms, o.smooth);
                 let rgb: Vec<u8> = cols.iter().flat_map(|c| c.unwrap_or([0.0; 3]).map(|v| (v * k).round() as u8)).collect();
-                (o.ip.clone(), stretch(&rgb, o.max))
+                let rgb = stretch(&rgb, o.max);
+                if o.fast {
+                    return Some((o.ip.clone(), rgb));
+                }
+                // A slow light gets every 5th frame: keep each segment's brightest colour in between,
+                // so a short hit between two sent frames still shows.
+                let p = peak.entry(o.ip.clone()).or_default();
+                if p.len() != rgb.len() {
+                    *p = rgb;
+                } else {
+                    keep_brightest(p, &rgb);
+                }
+                even.then(|| (o.ip.clone(), std::mem::take(p)))
             })
             .collect();
         drop(s);
@@ -166,6 +179,15 @@ pub fn set_mode(ips: &[String], on: bool) {
     }
 }
 
+/// Per segment, keeps whichever colour is brighter (never mixes two colours into a third).
+fn keep_brightest(acc: &mut [u8], rgb: &[u8]) {
+    for (a, b) in acc.chunks_mut(3).zip(rgb.chunks(3)) {
+        if b.iter().max() > a.iter().max() {
+            a.copy_from_slice(b);
+        }
+    }
+}
+
 /// Resamples a frame to exactly `n` colours: a light rejects frames with more colours than it has
 /// segments, and spreads the colours it gets over its whole strip.
 fn stretch(rgb: &[u8], n: usize) -> Vec<u8> {
@@ -188,6 +210,13 @@ mod tests {
         assert_eq!(stretch(&[1, 2, 3, 4, 5, 6], 4), vec![1, 2, 3, 1, 2, 3, 4, 5, 6, 4, 5, 6]);
         assert_eq!(stretch(&[1, 2, 3, 4, 5, 6, 7, 8, 9], 1), vec![1, 2, 3]);
         assert_eq!(stretch(&[7, 8, 9], 84).len(), 84 * 3);
+    }
+
+    #[test]
+    fn slow_lights_keep_the_brightest() {
+        let mut acc = vec![0, 0, 50, 200, 0, 0];
+        keep_brightest(&mut acc, &[255, 255, 255, 0, 0, 100]);
+        assert_eq!(acc, vec![255, 255, 255, 200, 0, 0]);
     }
 }
 
