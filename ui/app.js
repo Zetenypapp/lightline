@@ -22,10 +22,11 @@ const demo = () => ({ name: 'Demo scene', len: 60, bpm: 120, tracks: [
 const S = { page: 'home', devices: [], scanning: false, msg: '', scenes: migrate([demo()]), cur: 0, sel: null, t: 0, playing: false, snap: true, bri: 100, black: false, noSave: false, an: null, anPath: '', loading: '', zoom: 1, ti: 0, blink: new Set(), off: pref('off', 0), smooth: pref('smooth', 40), names: prefJson('names'), lsegs: prefJson('lsegs') };
 // Most colours per frame each light accepts (it rejects bigger frames and goes dark). Measured on the
 // user's lights; unknown models get a low, safe default they can raise on Home.
-const SEG_DEFAULT = { H61F6: 84, H619C: 24 };
-const lightSegs = (d) => S.lsegs[d.device] ?? SEG_DEFAULT[d.sku] ?? 10;
+const SEG_DEFAULT = { H61F6: 84, H619C: 24, H6609: 10 };
+const MODEL = Object.fromEntries((window.MODELS ?? '').trim().split('\n').map((l) => { const [sku, name, len, segs] = l.split('|'); return [sku, { name, len, segs: +segs }]; }));
+const lightSegs = (d) => S.lsegs[d.device] ?? SEG_DEFAULT[d.sku] ?? MODEL[d.sku]?.segs ?? 10;
 function prefJson(k) { try { return JSON.parse(localStorage.getItem(k)) || {}; } catch { return {}; } }
-const devName = (d) => S.names[d.device] || d.sku;
+const devName = (d) => S.names[d.device] || (MODEL[d.sku] ? `${MODEL[d.sku].name} ${MODEL[d.sku].len}` : d.sku);
 const trackLight = (tr) => { const d = tr.dev && S.devices.find((x) => x.device === tr.dev); return d ? devName(d) : tr.dev ? 'Light not found' : 'No light'; };
 // Per-PC settings (light delay, smoothing): fine in browser storage, but it may be unavailable.
 function pref(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : +v; } catch { return d; } }

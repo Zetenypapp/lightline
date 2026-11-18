@@ -1,0 +1,94 @@
+// Govee models: code|name|length|segments shown in the Govee app (a safe starting "Max segments";
+// lights often accept more over LAN). Source: user-supplied sheet, 2026-11-18.
+window.MODELS = `
+H6102|RGBIC LED Strip (Bluetooth)|5 m|15
+H6104|TV LED Backlight (older strip)|3 m|1
+H610A|RGBIC LED Strip (Bluetooth)|10 m|15
+H6110|RGB LED Strip (2 rolls)|10 m|1
+H6117|RGBIC LED Strip (2 rolls)|10 m|15
+H6125|RGBIC LED Strip (Bluetooth)|5 m|15
+H6126|RGBIC LED Strip (Bluetooth)|10 m|15
+H6127|RGBIC LED Strip (Bluetooth)|15 m|15
+H6141|RGB LED Strip|5 m|1
+H6142|RGB LED Strip|10 m|1
+H6143|RGBIC LED Strip|5 m|15
+H6144|RGBIC LED Strip (2 rolls)|10 m|15
+H6159|RGB LED Strip|5 m|1
+H615A|RGB LED Strip|5 m|1
+H615B|RGB LED Strip|10 m|1
+H615C|RGB LED Strip|15 m|1
+H6160|RGB LED Strip (waterproof)|5 m|1
+H6163|RGBIC LED Strip (coated)|5 m|15
+H617A|RGBIC Basic LED Strip|5 m|15
+H618A|RGBIC Basic LED Strip|5 m|15
+H618C|RGBIC Basic LED Strip|10 m|15
+H618E|RGBIC Basic LED Strip|20 m|15
+H619A|RGBIC LED Strip (coated)|5 m|15
+H619B|RGBIC LED Strip (coated)|7.5 m|15
+H619C|RGBIC LED Strip (coated)|10 m|15
+H619D|RGBIC LED Strip (coated)|15 m|15
+H619E|RGBIC LED Strip (coated)|20 m|15
+H619Z|RGBIC Pro LED Strip|3 m|15
+H61A0|Neon Rope Light|3 m|15
+H61A1|Neon Rope Light|5 m|15
+H61A2|Neon Rope Light|5 m|15
+H61B2|Neon Rope Light 2nd Gen|3 m|30
+H61C2|LED Strip with Covers|2 m|20
+H61C3|LED Strip with Covers|3 m|30
+H61C5|LED Strip with Covers|5 m|50
+H61D3|Neon Rope Light 2|3 m|42
+H61D5|Neon Rope Light 2|5 m|64
+H61E0|LED Strip Light M1|2 m|20
+H61E1|LED Strip Light M1|5 m|50
+H61F2|Strip Light 2 Pro|2 m|4
+H61F5|Strip Light 2 Pro|5 m|10
+H61F6|Strip Light 2 Pro|10 m|20
+H61E5|COB Strip Light Pro|3 m|36
+H61E6|COB Strip Light Pro|5 m|60
+H6054|Flow Plus Light Bars|2 bars|6
+H6056|Flow Pro Light Bars|2 bars|6
+H605B|Envisual TV Backlight T1|3.8 m|15
+H605C|Envisual TV Backlight T2|3.6 m|18
+H605D|Envisual TV Backlight T2|5 m|18
+H6099|TV Backlight 3 Lite|3.6 m|15
+H609A|TV Backlight 3 Lite|5 m|15
+H609B|TV Backlight 3 Lite|2.4 m|15
+H6601|AI Gaming Sync Box Kit|3.6 m|15
+H6602|AI Sync Box Kit 2|3.6 m|20
+H6603|AI Sync Box Kit 2|5 m|20
+H6604|AI Sync Box Kit 2 (monitor)|2.4 m|20
+H6198|Immersion TV Backlight|3.8 m|15
+H6199|Immersion TV Backlight T1|3.8 m|15
+H6001|Smart LED Bulb (Bluetooth)|A19|1
+H6002|Smart LED Bulb|A19|1
+H6003|Smart LED Bulb|A19|1
+H6006|Smart LED Bulb 800lm|A19|1
+H6008|RGBWW Smart Bulb 800lm|A19|1
+H6009|RGBWW Smart Bulb 1200lm|A19|1
+H600D|RGBWW Smart Bulb GU10|GU10|1
+H6052|Aura Table Lamp|20 cm|15
+H6057|Star Light Projector|desk|1
+H6059|Night Light|15 cm|1
+H6072|Lyra Floor Lamp|1.45 m|15
+H6073|Floor Lamp (Bluetooth)|1.36 m|15
+H6076|Floor Lamp Basic|1.36 m|7
+H6078|Cylinder Floor Lamp|1.45 m|15
+H6079|Floor Lamp Pro|1.72 m|20
+H607C|Floor Lamp 2|1.52 m|15
+H6022|Table Lamp 2|22 cm|12
+H6092|Uplighter Floor Lamp|1.70 m|3
+H6046|RGBIC Gaming Light Bars|2 bars|6
+H6047|RGBIC Gaming Light Bars Pro|2 bars|10
+H6609|Gaming Light Strip G1 Pro|1.4 m|15
+H61A5|Neon Rope Light for Desks|3 m|42
+H6061|Glide Hexa Light Panels|10 panels|10
+H6062|Glide Wall Light (6 bars)|6 bars|12
+H6063|Glide Wall Light (8 bars)|8 bars|16
+H6065|Glide Y Lights|5 panels|15
+H6066|Glide Hexa Pro Panels|10 panels|10
+H6067|Glide Triangle Panels|10 panels|10
+H606A|Hexagon Panels Ultra|10 panels|10
+H6087|Indoor Wall Sconces|2 sconces|2
+H6088|RGBIC Cube Wall Sconces|6 sconces|6
+H6089|Indoor Wall Sconces|2 sconces|2
+`;
