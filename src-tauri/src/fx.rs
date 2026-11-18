@@ -32,8 +32,8 @@ pub struct Ctx<'a> {
 struct Vis {
     hit: [f32; GROUPS], // how hard each section's sound just hit, 0..1
     flash: f32,         // drop: sudden jump in loudness, 0..1
-    laser: f32,         // treble hit strength
-    at: f32,            // where the treble sits (0 low .. 1 high): a sweeping sound moves it
+    laser: f32,         // lead note loudness, 0..1
+    at: f32,            // lead note pitch (0 low .. 1 high)
 }
 const GROUPS: usize = SPEC; // one section per spectrum band
 const DROP: f32 = 0.12; // loudness jump (0..1) that counts as a drop
@@ -64,12 +64,9 @@ impl Ctx<'_> {
             let (fast, slow) = (loud(f - fr(0.15)..f + 1), loud(f - fr(4.0)..f - fr(0.5)));
             v.flash = ((fast - slow - DROP) * 4.0).clamp(0.0, 1.0);
         }
-        let hi = SPEC / 2..SPEC;
-        let sum: f32 = hi.clone().map(|k| sp(f, k)).sum();
-        if sum > 0.0 {
-            v.at = hi.clone().map(|k| sp(f, k) * (k - hi.start) as f32).sum::<f32>() / sum / (hi.len() - 1) as f32;
+        if let Some(l) = a.lead.get(f * 2..f * 2 + 2) {
+            (v.at, v.laser) = (l[0] as f32 / 255.0, (l[1] as f32 / 255.0).powf(0.35)); // ^0.35: quiet notes still clearly visible
         }
-        v.laser = v.hit[GROUPS * 3 / 4..].iter().copied().fold(0.0, f32::max);
         v
     }
 
@@ -189,8 +186,9 @@ fn clip_colors(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
                     let (v, hue) = vis.as_ref().unwrap();
                     let g = ((x * GROUPS as f32) as usize).min(GROUPS - 1);
                     let sec = lvl(hsl(hue + g as f32 * (300.0 / GROUPS as f32), 100.0, 50.0), v.hit[g].powf(0.7)); // dark until hit
-                    let beam = lvl([255.0; 3], (1.0 - (x - v.at).abs() * 10.0).max(0.0) * v.laser);
-                    mix(screen(Some(sec), Some(beam)).unwrap(), [255.0; 3], v.flash)
+                    // The lead note: 1-2 segments at its pitch, white, over the sections.
+                    let beam = (1.0 - (i as f32 - v.at * (n - 1) as f32).abs()).max(0.0) * v.laser;
+                    mix(mix(sec, [255.0; 3], beam), [255.0; 3], v.flash)
                 }
                 _ => a,
             };
@@ -329,7 +327,7 @@ fn vis_on_song() {
         if v.flash > 0.5 { flashes += 1; }
         if t >= from && t < from + 12.0 {
             let row: String = clip_colors(&clip, 48, t, &cx).iter().map(|c| [' ', '.', ':', '*', '#'][((c[0] + c[1] + c[2]) / 3.0 / 52.0) as usize]).collect();
-            println!("{t:6.2} |{row}| flash {:.2} hits {:?}", v.flash, v.hit.map(|h| (h * 9.0) as u8));
+            println!("{t:6.2} |{row}| flash {:.2} lead {:.2} {:.2}", v.flash, v.at, v.laser);
         }
     }
     println!("frames with drop flash: {flashes} of {}", (mono.len() as f64 / track.rate as f64 * 20.0) as usize);

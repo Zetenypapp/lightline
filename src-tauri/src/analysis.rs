@@ -6,6 +6,8 @@ use rustfft::{num_complex::Complex, FftPlanner};
 
 const N: usize = 2048;
 const HOP: usize = 512;
+/// How many times louder than its neighbourhood a peak must be to count as a note.
+const LEAD_TONE: f32 = 6.0;
 /// Log-spaced spectrum bands for the Spectrum effect.
 pub const SPEC: usize = 24;
 
@@ -25,6 +27,9 @@ pub struct Analysis {
     pub bands: Vec<u8>,
     /// Per frame: SPEC log-spaced bands, each 0..255.
     pub spec: Vec<u8>,
+    /// Per frame: the strongest clear note between 500 Hz and 5 kHz (a lead synth, a "laser"):
+    /// pitch 0..255 on a log scale, then loudness 0..255 (0 = no clear note).
+    pub lead: Vec<u8>,
 }
 
 pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
@@ -34,7 +39,7 @@ pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
     let frames = if mono.len() > N { (mono.len() - N) / HOP + 1 } else { 0 };
     // Under 2 s there is too little to find a tempo (and the lag search would underflow).
     if frames < (fps * 2.0) as usize {
-        return Analysis { bpm: 120.0, beats: vec![], downbeats: vec![], fps, lag, bands: vec![], spec: vec![] };
+        return Analysis { bpm: 120.0, beats: vec![], downbeats: vec![], fps, lag, bands: vec![], spec: vec![], lead: vec![] };
     }
 
     let win: Vec<f32> = (0..N)
@@ -53,6 +58,8 @@ pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
     let kmax = (N / 2).min((16000.0 / bin_hz) as usize);
     let band_of: Vec<Option<usize>> = (0..N / 2).map(|k| spec_band(k, kmax)).collect();
     let mut spec = Vec::with_capacity(frames * SPEC);
+    let (lead_lo, lead_hi) = ((500.0 / bin_hz) as usize, (5000.0 / bin_hz) as usize);
+    let (mut lead_pos, mut lead_amp) = (Vec::with_capacity(frames), Vec::with_capacity(frames));
     for f in 0..frames {
         let s = &mono[f * HOP..f * HOP + N];
         for i in 0..N {
@@ -74,6 +81,15 @@ pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
                 sp[b] += m * m;
             }
         }
+        // Lead note: the biggest peak, if it stands well clear of its neighbourhood (a tone, not noise).
+        let m = |k: usize| buf[k].norm();
+        let kp = (lead_lo..lead_hi).max_by(|&a, &b| m(a).total_cmp(&m(b))).unwrap_or(lead_lo);
+        let around = (kp.saturating_sub(24)..kp + 25).filter(|k| k.abs_diff(kp) > 2).map(m).sum::<f32>() / 44.0;
+        let (a, b, c) = (m(kp - 1), m(kp), m(kp + 1));
+        let den = a - 2.0 * b + c;
+        let kf = kp as f64 + if den < 0.0 { (0.5 * (a - c) / den).clamp(-0.5, 0.5) as f64 } else { 0.0 };
+        lead_pos.push(((kf / lead_lo as f64).ln() / (lead_hi as f64 / lead_lo as f64).ln()).clamp(0.0, 1.0) as f32);
+        lead_amp.push(if b > LEAD_TONE * around { b } else { 0.0 });
         onset.push(flux);
         bass_onset.push(bflux);
         energy.extend(e.map(f32::sqrt));
@@ -114,7 +130,16 @@ pub fn analyze(mono: &[f32], sr: u32) -> Analysis {
     };
 
     let (bands, spec) = (to_u8(&energy, 3), to_u8(&spec, SPEC));
-    Analysis { bpm: (bpm * 10.0).round() / 10.0, beats, downbeats, fps, lag, bands, spec }
+    // Spread this song's notes over the whole strip, and its loudest notes to full brightness.
+    let mut on: Vec<(f32, f32)> = lead_pos.iter().zip(&lead_amp).filter(|(_, &a)| a > 0.0).map(|(&p, &a)| (p, a)).collect();
+    let pct = |v: &mut Vec<f32>, q: f32| { v.sort_by(f32::total_cmp); v.get(((v.len().max(1) - 1) as f32 * q) as usize).copied().unwrap_or(0.0) };
+    let (mut ps, mut amps): (Vec<f32>, Vec<f32>) = on.drain(..).unzip();
+    let (p_lo, p_hi, a_top) = (pct(&mut ps, 0.05), pct(&mut ps, 0.95), pct(&mut amps, 0.9).max(1e-9));
+    let lead = lead_pos.iter().zip(&lead_amp).flat_map(|(&p, &a)| {
+        let p = ((p - p_lo) / (p_hi - p_lo).max(1e-3)).clamp(0.0, 1.0);
+        [(p * 255.0).round() as u8, ((a / a_top).min(1.0) * 255.0).round() as u8]
+    }).collect();
+    Analysis { bpm: (bpm * 10.0).round() / 10.0, beats, downbeats, fps, lag, bands, spec, lead }
 }
 
 /// Scales each column of frame-major `rows` (`width` per frame) by its 98th percentile to 0..255.
