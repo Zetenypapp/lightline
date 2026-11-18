@@ -58,6 +58,11 @@ article.card:hover{transform:translateY(-2px);box-shadow:0 10px 24px rgba(0,0,0,
 .fxtile:active{transform:scale(.96)}
 .fxtile .segs{height:44px;gap:2px;padding:6px;background:var(--bg);border-radius:8px}
 .fxtile .segs i{border-radius:3px}
+.fxtile,.devitem{cursor:grab;touch-action:none}
+.devitem{display:flex;align-items:center;gap:6px;min-height:36px;padding:0 10px;background:var(--panel2);border:2px solid transparent;border-radius:10px;font-weight:600;text-align:left;cursor:grab}
+.devitem:hover{border-color:var(--accent)}
+.devitem .muted{margin-left:auto}
+.ghost{position:fixed;z-index:50;pointer-events:none;padding:6px 12px;border-radius:999px;background:var(--accent);color:var(--on);font-weight:700;font-size:12.5px;box-shadow:0 8px 20px rgba(0,0,0,.4)}
 .stage{flex:1;min-width:0;padding:24px;display:flex;flex-direction:column;justify-content:center;gap:20px;background:radial-gradient(80% 90% at 50% 50%,#20232e,#101117);border-radius:var(--r)}
 .pv{display:flex;align-items:center;gap:14px}
 .pv>span{width:150px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

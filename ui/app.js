@@ -63,10 +63,14 @@ function hsl(h, s, l) {
 function hex(c) { return `#${c.map((v) => v.toString(16).padStart(2, '0')).join('')}`; }
 const rgbOf = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) || 0);
 const ink = (h) => { const [r, g, b] = rgbOf(h); return 0.299 * r + 0.587 * g + 0.114 * b > 140 ? '#10121a' : '#ffffff'; };
-// Old clips stored one hue; now clips have two colours.
+// Old clips stored one hue (now two colours); old tracks on one light were chained (now each has a start segment).
 function migrate(scenes) {
-  for (const s of scenes) for (const tr of s.tracks) for (const c of tr.clips) {
-    c.col ??= hex(hsl(c.hue ?? 0, 85, 58)); c.col2 ??= hex(hsl((c.hue ?? 0) + 120, 85, 58)); delete c.hue;
+  for (const s of scenes) {
+    const next = {};
+    for (const tr of s.tracks) {
+      if (tr.from == null) { tr.from = tr.dev ? next[tr.dev] ?? 0 : 0; if (tr.dev) next[tr.dev] = tr.from + tr.segs; }
+      for (const c of tr.clips) { c.col ??= hex(hsl(c.hue ?? 0, 85, 58)); c.col2 ??= hex(hsl((c.hue ?? 0) + 120, 85, 58)); delete c.hue; }
+    }
   }
   return scenes;
 }
@@ -76,9 +80,18 @@ const lvl = (c, f) => c.map((v) => v * f);
 const rnd = (a, b) => frac(Math.sin(a * 12.9898 + b * 78.233) * 43758.5453); // stable pseudo-random per segment+time step
 
 // shortcut: colours are computed in JS for both preview and lights; move to Rust if 30 fps ever costs too much CPU.
+// Light blend ("screen"): colours add up without clipping harshly; null = nothing there.
+const screen = (a, b) => (!a ? b : !b ? a : a.map((v, k) => Math.round(255 - ((255 - v) * (255 - b[k])) / 255)));
+
+// All clips playing on a track at time t, layered.
 function colorsAt(tr, t) {
-  const n = tr.segs, c = !S.black && tr.clips.find((k) => t >= k.start && t < k.start + k.len);
-  if (!c) return Array(n).fill(null);
+  const out = Array(tr.segs).fill(null);
+  if (S.black) return out;
+  for (const c of tr.clips) if (t >= c.start && t < c.start + c.len) clipColors(c, tr.segs, t).forEach((col, i) => { out[i] = screen(out[i], col); });
+  return out;
+}
+
+function clipColors(c, n, t) {
   const A = rgbOf(c.col), B = rgbOf(c.col2), sp = c.speed ?? 1;
   const p = (t - c.start) * sp, b = (beatPos(t) - beatPos(c.start)) * sp, fb = frac(b);
   const env = ((c.bri ?? 100) / 100) * Math.min(1, c.fin ? (t - c.start) / c.fin : 1, c.fout ? (c.start + c.len - t) / c.fout : 1);
@@ -124,15 +137,17 @@ function smoother() {
 }
 const smPreview = smoother(), smLights = smoother();
 
-// Tracks on the same light are chained in track order -> one frame per light.
+// One frame per light: each track lands at its start segment, overlapping tracks layer.
 function deviceFrames() {
   const by = new Map(), k = S.bri / 100, now = performance.now(), t = S.t - S.off / 1000;
   for (const tr of sc().tracks) {
     const d = tr.dev && S.devices.find((x) => x.device === tr.dev);
     if (!d) continue;
-    by.set(d.ip, [...(by.get(d.ip) ?? []), ...colorsAt(tr, t)]);
+    const f = by.get(d.ip) ?? [];
+    colorsAt(tr, t).forEach((c, i) => { const j = (tr.from ?? 0) + i; f[j] = screen(f[j], c); });
+    by.set(d.ip, f);
   }
-  return [...by].map(([ip, cols]) => [ip, smLights(ip, cols, now).flatMap((c) => (c ? c.map((v) => Math.round(v * k)) : [0, 0, 0]))]);
+  return [...by].map(([ip, cols]) => [ip, smLights(ip, Array.from(cols, (c) => c ?? null), now).flatMap((c) => (c ? c.map((v) => Math.round(v * k)) : [0, 0, 0]))]);
 }
 let sending = false, streamIps = [];
 function sendFrame() {
@@ -172,7 +187,9 @@ const V = {
     <button class="btn" data-act="pick" data-i="${S.cur}">Go live</button>
   </div>
   <div class="panes">
-    <aside class="lib"><h2 class="label">Effects</h2><div class="fxgrid">${EFFECTS.map((fx) => `<button class="fxtile" data-act="add" data-fx="${fx}"><span class="segs">${segs(colorsAt({ segs: 8, clips: [{ fx, start: 0, len: 1e9, col: FX_COLORS[fx]?.[0] ?? '#2fd8b4', col2: FX_COLORS[fx]?.[1] ?? '#7c6cff' }] }, 0.7))}</span>${fx}</button>`).join('')}</div><p class="muted small">Click an effect to drop it at the playhead.</p></aside>
+    <aside class="lib"><h2 class="label">Effects</h2><div class="fxgrid">${EFFECTS.map((fx) => `<button class="fxtile" data-act="add" data-fx="${fx}"><span class="segs">${segs(colorsAt({ segs: 8, clips: [{ fx, start: 0, len: 1e9, col: FX_COLORS[fx]?.[0] ?? '#2fd8b4', col2: FX_COLORS[fx]?.[1] ?? '#7c6cff' }] }, 0.7))}</span>${fx}</button>`).join('')}</div><p class="muted small">Drag an effect onto a track, or click to add it at the playhead on the selected track.</p>
+      <h2 class="label" style="margin-top:8px">Lights</h2>${S.devices.map((d) => `<button class="devitem" data-act="assign" data-dev="${esc(d.device)}"><i class="dot"></i>${esc(d.sku)}<span class="muted small">${esc(d.ip)}</span></button>`).join('') || '<p class="muted small">No lights found yet.</p>'}
+      <p class="muted small">Drag a light onto a track, or click to give it to the selected track.</p></aside>
     <section class="stage" id="stage" aria-label="Preview">${stage()}</section>
     <aside class="insp">${c ? inspector(c) : '<h2 class="label">Clip</h2><p class="muted small">Select a clip on the timeline.</p>'}${trackPanel()}${outputPanel()}</aside>
   </div>
@@ -217,12 +234,13 @@ const outputPanel = () => `<h2 class="label" style="margin-top:8px">Light output
 const trackPanel = () => {
   const tr = sc().tracks[S.ti]; if (!tr) return '';
   const offline = tr.dev && !S.devices.some((d) => d.device === tr.dev);
-  const total = tr.dev ? sc().tracks.filter((x) => x.dev === tr.dev).reduce((n, x) => n + x.segs, 0) : 0;
+  const total = tr.dev ? Math.max(...sc().tracks.filter((x) => x.dev === tr.dev).map((x) => (x.from ?? 0) + x.segs)) : 0;
   return `<h2 class="label" style="margin-top:8px">Track · ${esc(tr.name)}</h2>
 <label class="field">Light<select data-in="tdev"><option value="">None (preview only)</option>${S.devices.map((d) => `<option value="${esc(d.device)}"${d.device === tr.dev ? ' selected' : ''}>${esc(d.sku)} · ${esc(d.ip)}</option>`).join('')}${offline ? `<option value="${esc(tr.dev)}" selected>Light not found</option>` : ''}</select></label>
-<label class="field">Segments<input type="number" min="1" max="84" value="${tr.segs}" data-in="tsegs"></label>
-${total > 84 ? `<p class="warn small">This light gets ${total} segments from its tracks, but takes at most 84. Segments after 84 are cut off.</p>` : ''}
-<p class="muted small">Tracks on the same light are chained in order: three 5-segment tracks = three zones of a 15-segment strip.</p>`;
+<div class="row"><label class="field" style="flex:1">Starts at segment<input type="number" min="1" max="84" value="${(tr.from ?? 0) + 1}" data-in="tfrom"></label><label class="field" style="flex:1">Segments<input type="number" min="1" max="84" value="${tr.segs}" data-in="tsegs"></label></div>
+${total > 84 ? `<p class="warn small">Tracks on this light reach segment ${total}, but it takes at most 84. Segments after 84 are cut off.</p>` : ''}
+<p class="muted small">Tracks on the same light layer on top of each other. Give them different start segments to make zones.</p>
+<button class="btn" data-act="delTrack">Delete track</button>`;
 };
 
 function timeline() {
@@ -231,7 +249,7 @@ function timeline() {
   const ticks = Array.from({ length: Math.ceil(s.len / step) }, (_, i) => `<span style="left:${pct(i * step)}">${step < 1 ? fmt(i * step) : fmt(i * step).slice(0, -2)}</span>`).join('');
   return `<div class="tlbody" style="width:calc(192px + (100% - 192px) * ${S.zoom})"><div class="ruler" data-seek>${ticks}</div>
 ${S.an ? `<div class="track audio"><div class="thead"><i style="background:var(--accent2)"></i><span class="tname">${esc(s.audio.name)}</span></div><div class="lane" data-seek><canvas id="wave" aria-label="Music waveform with beat lines"></canvas></div></div>` : ''}
-${s.tracks.map((tr, ti) => `<div class="track"><div class="thead${ti === S.ti ? ' on' : ''}"><button class="tdot" data-act="track" data-ti="${ti}" aria-label="Track settings" title="Track settings" style="background:hsl(${160 + ti * 70} 70% 60%)"></button><input class="tname" aria-label="Track name" value="${esc(tr.name)}" data-in="tname" data-ti="${ti}"></div><div class="lane" data-seek>${tr.clips.map((c, ci) => `<button class="clip${S.sel?.ti === ti && S.sel?.ci === ci ? ' sel' : ''}" data-act="sel" data-ti="${ti}" data-ci="${ci}" style="left:${pct(c.start)};width:${pct(c.len)};background:${c.col};color:${ink(c.col)}">${c.fx}</button>`).join('')}</div></div>`).join('')}
+${s.tracks.map((tr, ti) => `<div class="track" data-ti="${ti}"><div class="thead${ti === S.ti ? ' on' : ''}"><button class="tdot" data-act="track" data-ti="${ti}" aria-label="Track settings" title="Track settings" style="background:hsl(${160 + ti * 70} 70% 60%)"></button><input class="tname" aria-label="Track name" value="${esc(tr.name)}" data-in="tname" data-ti="${ti}"></div><div class="lane" data-seek data-ti="${ti}">${tr.clips.map((c, ci) => `<button class="clip${S.sel?.ti === ti && S.sel?.ci === ci ? ' sel' : ''}" data-act="sel" data-ti="${ti}" data-ci="${ci}" style="left:${pct(c.start)};width:${pct(c.len)};background:${c.col};color:${ink(c.col)}">${c.fx}</button>`).join('')}</div></div>`).join('')}
 <div class="phwrap"><div id="playhead" style="left:${pct(S.t)}"></div></div></div>`;
 }
 
@@ -402,12 +420,11 @@ const A = {
   step: (d) => A.pick({ i: (S.cur + +d.d + S.scenes.length) % S.scenes.length }),
   play: () => setPlaying(!S.playing),
   rewind: () => seek(0),
-  add: (d) => {
-    const s = sc(); if (!s.tracks.length) return;
-    const ti = S.sel?.ti ?? 0, len = Math.min(4 * beat(), s.len);
-    const h = Math.random() * 360, [col, col2] = FX_COLORS[d.fx] ?? [hex(hsl(h, 85, 58)), hex(hsl(h + 120, 85, 58))];
-    s.tracks[ti].clips.push({ fx: d.fx, start: Math.min(snap(S.t), s.len - len), len, col, col2 });
-    S.sel = { ti, ci: s.tracks[ti].clips.length - 1 };
+  add: (d) => addClip(S.ti, d.fx, S.t),
+  assign: (d) => { const tr = sc().tracks[S.ti]; if (!tr) return; tr.dev = d.dev; save(); render(); },
+  delTrack: () => {
+    sc().tracks.splice(S.ti, 1);
+    S.ti = Math.max(0, S.ti - 1); S.sel = null;
     save(); render();
   },
   dup: () => {
@@ -432,7 +449,38 @@ const A = {
   black: () => { S.black = !S.black; render(); },
 };
 
+function addClip(ti, fx, at) {
+  const s = sc(), tr = s.tracks[ti]; if (!tr) return;
+  const len = Math.min(4 * beat(), s.len), h = Math.random() * 360;
+  const [col, col2] = FX_COLORS[fx] ?? [hex(hsl(h, 85, 58)), hex(hsl(h + 120, 85, 58))];
+  tr.clips.push({ fx, start: Math.max(0, Math.min(snap(at), s.len - len)), len, col, col2 });
+  S.sel = { ti, ci: tr.clips.length - 1 }; S.ti = ti;
+  save(); render();
+}
+
+// Pointer-based drag with a floating label (HTML5 drag-and-drop is swallowed by the webview's file-drop handling).
+let dragged = false;
+function ghostDrag(e, label, onDrop) {
+  const x0 = e.clientX, y0 = e.clientY;
+  let g = null;
+  const move = (ev) => {
+    if (!g && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 5) return; // still a click
+    g ??= document.body.appendChild(Object.assign(document.createElement('div'), { className: 'ghost', textContent: label }));
+    g.style.left = `${ev.clientX + 10}px`; g.style.top = `${ev.clientY + 10}px`;
+  };
+  const up = (ev) => {
+    removeEventListener('pointermove', move); removeEventListener('pointerup', up);
+    if (!g) return;
+    g.remove();
+    dragged = true; setTimeout(() => { dragged = false; }); // swallow the click that follows a drag
+    onDrop(document.elementFromPoint(ev.clientX, ev.clientY), ev.clientX);
+  };
+  addEventListener('pointermove', move); addEventListener('pointerup', up);
+}
+const timeAt = (lane, x) => { const r = lane.getBoundingClientRect(); return ((x - r.left) / r.width) * sc().len; };
+
 document.addEventListener('click', (e) => {
+  if (dragged) return;
   const el = e.target.closest('[data-act]');
   if (el && A[el.dataset.act]) A[el.dataset.act](el.dataset);
 });
@@ -448,6 +496,7 @@ document.addEventListener('input', (e) => {
     case 'smooth': S.smooth = v; setPref('smooth', v); $('#smoothv').textContent = v * 3; return;
     case 'zoom': setZoom(2 ** v); return;
     case 'tdev': s.tracks[S.ti].dev = v; save(); return;
+    case 'tfrom': if (v < 1 || v > 84) return; s.tracks[S.ti].from = Math.round(v) - 1; save(); return;
     case 'tsegs': if (v < 1 || v > 84) return; s.tracks[S.ti].segs = Math.round(v); paint(); save(); return; // warning updates on next render
     case 'bri': S.bri = v; $('#briv').textContent = v; $('#stage').style.filter = `brightness(${v}%)`; return;
     case 'name': s.name = v; save(); return;
@@ -471,6 +520,10 @@ document.addEventListener('input', (e) => {
 
 document.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
+  const tile = e.target.closest('.fxtile');
+  if (tile) return ghostDrag(e, tile.dataset.fx, (to, x) => { const lane = to?.closest('.lane[data-ti]'); if (lane) addClip(+lane.dataset.ti, tile.dataset.fx, timeAt(lane, x)); });
+  const dev = e.target.closest('.devitem');
+  if (dev) return ghostDrag(e, dev.textContent, (to) => { const row = to?.closest('.track[data-ti]'); if (row) { S.ti = +row.dataset.ti; A.assign(dev.dataset); } });
   const el = e.target.closest('.clip');
   if (el) return drag(el, e);
   const bar = e.target.closest('[data-seek]');
@@ -483,14 +536,27 @@ function drag(el, e) {
   const s = sc(), c = s.tracks[+el.dataset.ti].clips[+el.dataset.ci];
   const w = el.parentElement.clientWidth, x0 = e.clientX, s0 = c.start, l0 = c.len;
   const resize = e.clientX > el.getBoundingClientRect().right - 8;
-  S.sel = { ti: +el.dataset.ti, ci: +el.dataset.ci };
+  const from = +el.dataset.ti;
+  let ti = from;
+  S.sel = { ti, ci: +el.dataset.ci };
   el.setPointerCapture(e.pointerId);
   el.onpointermove = (ev) => {
     const dt = ((ev.clientX - x0) / w) * s.len;
+    // Moving up/down onto another track: show it there now, move it in the data on release.
+    const lane = !resize && document.elementsFromPoint(ev.clientX, ev.clientY).find((n) => n.matches('.lane[data-ti]'));
+    if (lane && +lane.dataset.ti !== ti) { ti = +lane.dataset.ti; lane.append(el); }
     if (resize) { c.len = Math.max(0.1, Math.min(s.len, snap(s0 + l0 + dt)) - c.start); el.style.width = pct(c.len); }
     else { c.start = Math.max(0, Math.min(s.len - c.len, snap(s0 + dt))); el.style.left = pct(c.start); }
   };
-  el.onpointerup = () => { el.onpointermove = el.onpointerup = null; save(); render(); };
+  el.onpointerup = () => {
+    el.onpointermove = el.onpointerup = null;
+    if (ti !== from) {
+      s.tracks[from].clips.splice(+el.dataset.ci, 1);
+      s.tracks[ti].clips.push(c);
+      S.sel = { ti, ci: s.tracks[ti].clips.length - 1 }; S.ti = ti;
+    }
+    save(); render();
+  };
 }
 
 document.addEventListener('keydown', (e) => {
