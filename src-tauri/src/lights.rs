@@ -15,6 +15,7 @@ pub struct Light {
 
 struct State {
     gen: u64, // which render the frames belong to: parts of an older render are ignored
+    ticks: u64,
     fps: f64,
     lights: Vec<Light>,
     live: Vec<String>,                  // lights currently in real-time mode
@@ -30,7 +31,7 @@ pub struct Lights {
 
 impl Lights {
     pub fn start(player: Arc<Player>) -> Arc<Self> {
-        let st = State { gen: 0, fps: 30.0, lights: vec![], live: vec![], play: None, bri: 1.0, off: 0.0, black: false };
+        let st = State { gen: 0, ticks: 0, fps: 30.0, lights: vec![], live: vec![], play: None, bri: 1.0, off: 0.0, black: false };
         let me = Arc::new(Lights { st: Mutex::new(st) });
         let l = me.clone();
         std::thread::spawn(move || {
@@ -52,6 +53,7 @@ impl Lights {
 
     /// Starts a new show: dark frames until `part` fills them in.
     pub fn load(&self, gen: u64, fps: f64, frames: usize, lights: Vec<(String, usize)>) {
+        eprintln!("[lights] show {gen}: {frames} frames at {fps} fps, lights {lights:?}");
         let mut s = self.st.lock().unwrap();
         (s.gen, s.fps) = (gen, fps);
         s.lights = lights.into_iter().map(|(ip, width)| Light { ip, width, frames: vec![0; frames * width * 3] }).collect();
@@ -74,6 +76,7 @@ impl Lights {
     }
 
     pub fn play(&self, at: f64, audio: bool) {
+        eprintln!("[lights] play at {at:.2} (audio clock: {audio})");
         self.st.lock().unwrap().play = Some((at, Instant::now(), audio));
     }
 
@@ -108,6 +111,9 @@ impl Lights {
         let on: Vec<String> = want.iter().filter(|ip| !s.live.contains(ip)).cloned().collect();
         let off: Vec<String> = s.live.iter().filter(|ip| !want.contains(ip)).cloned().collect();
         s.live = want;
+        s.ticks += 1;
+        // Keep-alive: re-assert real-time mode every 2 s, so a light that dropped out comes back.
+        let keep = if s.ticks % (2 * SEND_HZ as u64) == 0 { s.live.clone() } else { vec![] };
         let pos = (t - s.off) * s.fps;
         let k = if s.black { 0.0 } else { s.bri };
         let frames: Vec<(String, Vec<u8>)> = s.lights.iter().map(|l| (l.ip.clone(), frame_at(l, pos, k))).collect();
@@ -118,22 +124,33 @@ impl Lights {
                 set_mode(&off, false);
             });
         }
+        for ip in &keep {
+            let _ = govee::stream_mode(ip, true);
+        }
+        let log = (pos as u64) % 30 == 0; // about once a second
         for (ip, rgb) in frames {
-            let _ = govee::frame(&ip, &rgb);
+            let r = govee::frame(&ip, &rgb);
+            if log || r.is_err() {
+                eprintln!("[lights] t={t:.2} {ip}: {} segs, brightest {} {r:?}", rgb.len() / 3, rgb.iter().max().unwrap_or(&0));
+            }
         }
     }
 }
 
-/// Sent 3 times: a lost UDP packet here leaves a light stuck in (or out of) real-time mode.
+/// Switching on: "turn on" first and let it settle, because a "turn on" that lands after real-time mode
+/// started puts some lights (the H61F6) back on their normal scene. Mode sent 3 times: lost UDP packets.
 pub fn set_mode(ips: &[String], on: bool) {
     if ips.is_empty() {
         return;
     }
+    if on {
+        for ip in ips {
+            let _ = govee::turn(ip, true);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
     for _ in 0..3 {
         for ip in ips {
-            if on {
-                let _ = govee::turn(ip, true);
-            }
             let _ = govee::stream_mode(ip, on);
         }
         std::thread::sleep(Duration::from_millis(40));
@@ -160,7 +177,7 @@ mod tests {
 
     #[test]
     fn parts_fill_the_current_show_only() {
-        let l = Lights { st: Mutex::new(State { gen: 0, fps: 30.0, lights: vec![], live: vec![], play: None, bri: 1.0, off: 0.0, black: false }) };
+        let l = Lights { st: Mutex::new(State { gen: 0, ticks: 0, fps: 30.0, lights: vec![], live: vec![], play: None, bri: 1.0, off: 0.0, black: false }) };
         l.load(2, 30.0, 3, vec![("x".into(), 1)]);
         l.part(2, 1, vec![vec![9, 9, 9]]).unwrap();
         l.part(1, 0, vec![vec![5, 5, 5]]).unwrap(); // an older render: ignored

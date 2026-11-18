@@ -153,9 +153,9 @@ fn save_scenes(app: tauri::AppHandle, json: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn scan() -> Result<Vec<serde_json::Value>, String> {
-    tauri::async_runtime::spawn_blocking(govee::scan)
-        .await
-        .map_err(|e| e.to_string())?
+    let found = tauri::async_runtime::spawn_blocking(govee::scan).await.map_err(|e| e.to_string())?;
+    eprintln!("[scan] {:?}", found.as_ref().map(|v| v.iter().map(|d| format!("{} {}", d["sku"], d["ip"])).collect::<Vec<_>>()));
+    found
 }
 
 fn main() {
