@@ -286,3 +286,24 @@ mod tests {
         assert!(((d - 0.75) / 2.0 - ((d - 0.75) / 2.0).round()).abs() < 0.05, "downbeat {d}");
     }
 }
+
+/// Per-beat report of a stretch of a song: SONG=path FROM=s TO=s cargo test beat_report -- --ignored --nocapture
+#[test]
+#[ignore]
+fn beat_report() {
+    let path = std::env::var("SONG").unwrap();
+    let env = |k: &str, d: f64| std::env::var(k).map_or(d, |v| v.parse().unwrap());
+    let (from, to) = (env("FROM", 0.0), env("TO", 30.0));
+    let (track, mono) = crate::audio::decode(std::path::Path::new(&path)).unwrap();
+    let a = analyze(&mono, track.rate);
+    println!("bpm {} beats {} downbeats {:?}", a.bpm, a.beats.len(), a.downbeats.iter().filter(|d| **d >= from && **d < to).collect::<Vec<_>>());
+    let n = a.bands.len() / 3;
+    for w in a.beats.windows(2).filter(|w| w[0] >= from && w[0] < to) {
+        let (f0, f1) = ((((w[0] - a.lag) * a.fps) as usize).min(n), (((w[1] - a.lag) * a.fps) as usize).min(n));
+        let avg = |k: usize| (f0..f1).map(|f| a.bands[f * 3 + k] as f32).sum::<f32>() / (f1 - f0).max(1) as f32;
+        let peak = |k: usize| (f0..(f0 + 4).min(f1)).map(|f| a.bands[f * 3 + k]).max().unwrap_or(0);
+        let lead = (f0..f1).map(|f| a.lead[f * 2 + 1] as f32).sum::<f32>() / (f1 - f0).max(1) as f32;
+        let down = if a.downbeats.iter().any(|d| (d - w[0]).abs() < 0.01) { "|" } else { " " };
+        println!("{down}{:6.2}  bass {:3.0} (hit {:3})  mid {:3.0}  high {:3.0}  lead {:3.0}", w[0], avg(0), peak(0), avg(1), avg(2), lead);
+    }
+}

@@ -6,8 +6,8 @@ use std::collections::HashMap;
 
 pub type Rgb = [f32; 3];
 
-pub const EFFECTS: [&str; 17] = [
-    "Solid", "Gradient", "Chase", "Pulse", "Breathe", "Wave", "Comet", "Sparkle", "Fire", "Alternate", "Beat flash", "Strobe", "Rainbow", "Bass hit", "Spectrum", "Meter", "Visualizer",
+pub const EFFECTS: [&str; 20] = [
+    "Solid", "Gradient", "Chase", "Pulse", "Breathe", "Wave", "Comet", "Sparkle", "Fire", "Alternate", "Beat flash", "Strobe", "Rainbow", "Bass hit", "Spectrum", "Meter", "Visualizer", "Kick", "Voice", "Lead",
 ];
 
 /// Starting colours for effects that need specific ones.
@@ -28,6 +28,22 @@ pub struct Ctx<'a> {
     pub bpm: f64,
 }
 
+/// How hard spectrum bands `ks` just hit at frame f: the jump above their last 0.3 s, held and
+/// fading over 0.15 s, 0..1.
+fn band_hit(a: &Analysis, f: usize, ks: std::ops::Range<usize>) -> f32 {
+    let fr = |s: f64| ((s * a.fps).round() as usize).max(1);
+    let (w, d) = (fr(0.3), fr(0.15));
+    let lvl = |g: usize| ks.clone().map(|k| a.spec[g * SPEC + k] as f32 / 255.0).sum::<f32>() / ks.len() as f32;
+    let mut h = 0f32;
+    for back in 0..d.min(f) {
+        let g = f - back;
+        let lo = g.saturating_sub(w);
+        let avg = (lo..g).map(lvl).sum::<f32>() / (g - lo) as f32;
+        h = h.max(((lvl(g) - avg) * 4.0).clamp(0.0, 1.0) * (1.0 - back as f32 / d as f32));
+    }
+    h
+}
+
 /// What the visualizer hears at one moment.
 struct Vis {
     hit: [f32; GROUPS], // how hard each section's sound just hit, 0..1
@@ -44,19 +60,9 @@ impl Ctx<'_> {
         let Some(a) = self.an.filter(|a| !a.spec.is_empty()) else { return v };
         let nf = (a.spec.len() / SPEC).min(a.bands.len() / 3);
         let Some(f) = self.frame(a, t).filter(|&f| f < nf) else { return v };
-        let sp = |g: usize, k: usize| a.spec[g * SPEC + k] as f32 / 255.0;
         let fr = |s: f64| ((s * a.fps).round() as usize).max(1);
-        // Hit = how far a section's level jumped above its last 0.3 s, held and fading over 0.15 s.
-        let (w, d) = (fr(0.3), fr(0.15));
         for (gi, h) in v.hit.iter_mut().enumerate() {
-            let ks = gi * SPEC / GROUPS..(gi + 1) * SPEC / GROUPS;
-            let lvl = |g: usize| ks.clone().map(|k| sp(g, k)).sum::<f32>() / ks.len() as f32;
-            for back in 0..d.min(f) {
-                let g = f - back;
-                let lo = g.saturating_sub(w);
-                let avg = (lo..g).map(lvl).sum::<f32>() / (g - lo) as f32;
-                *h = h.max(((lvl(g) - avg) * 4.0).clamp(0.0, 1.0) * (1.0 - back as f32 / d as f32));
-            }
+            *h = band_hit(a, f, gi * SPEC / GROUPS..(gi + 1) * SPEC / GROUPS);
         }
         // Drop = the last 0.15 s much louder than the 4 s before; fades as the song settles at the new level.
         let loud = |r: std::ops::Range<usize>| r.clone().map(|g| a.bands[g * 3..g * 3 + 3].iter().map(|&b| b as f32).sum::<f32>()).sum::<f32>() / (r.len() * 3 * 255).max(1) as f32;
@@ -68,6 +74,26 @@ impl Ctx<'_> {
             (v.at, v.laser) = (l[0] as f32 / 255.0, (l[1] as f32 / 255.0).powf(0.35)); // ^0.35: quiet notes still clearly visible
         }
         v
+    }
+
+    /// The analysis and the frame at t, when there is a spectrum for it.
+    fn at(&self, t: f64) -> Option<(&Analysis, usize)> {
+        let a = self.an.filter(|a| !a.spec.is_empty())?;
+        let f = self.frame(a, t).filter(|&f| f < (a.spec.len() / SPEC).min(a.bands.len() / 3))?;
+        Some((a, f))
+    }
+
+    /// Bass drum hits (43-115 Hz jumps), 0..1.
+    fn kick(&self, t: f64) -> f32 {
+        self.at(t).map_or(0.0, |(a, f)| band_hit(a, f, 0..4))
+    }
+
+    /// Vocal-range loudness (about 400 Hz-1.7 kHz) over the last 0.1 s, 0..1.
+    fn voice(&self, t: f64) -> f32 {
+        let Some((a, f)) = self.at(t) else { return 0.0 };
+        let r = f.saturating_sub((0.1 * a.fps) as usize)..f + 1;
+        let v = r.clone().map(|g| (9..15).map(|k| a.spec[g * SPEC + k] as f32).sum::<f32>() / 6.0 / 255.0).sum::<f32>() / r.len() as f32;
+        ((v - 0.3) / 0.7).clamp(0.0, 1.0)
     }
 
     fn beat(&self) -> f64 {
@@ -171,6 +197,12 @@ fn clip_colors(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
     let fade_in = if c.fin > 0.0 { (t - c.start) / c.fin } else { 1.0 };
     let fade_out = if c.fout > 0.0 { (c.start + c.len - t) / c.fout } else { 1.0 };
     let env = (c.bri / 100.0 * fade_in.min(fade_out).min(1.0)).max(0.0) as f32;
+    let level = match c.fx.as_str() {
+        "Kick" => cx.kick(t).powf(0.6),
+        "Voice" => cx.voice(t),
+        _ => 0.0,
+    };
+    let lead = (c.fx == "Lead").then(|| cx.vis(t));
     let vis = (c.fx == "Visualizer").then(|| (cx.vis(t), frac(cx.beat_pos(t).floor() * 0.13) as f32)); // colours shift each beat
     (0..n)
         .map(|j| {
@@ -198,6 +230,17 @@ fn clip_colors(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
                 "Bass hit" => lvl(a, cx.band(t, 0)),
                 "Spectrum" => lvl(pal_at(&c.pal, x), cx.spec(t, x).powf(1.5)), // ^1.5: quiet bands drop out, peaks pop
                 "Meter" => if x <= (cx.band(t, 0) + cx.band(t, 1) + cx.band(t, 2)) / 3.0 { pal_at(&c.pal, x) } else { [0.0; 3] },
+                // Burst from the centre on each kick / bar from the centre that widens with the vocals.
+                "Kick" | "Voice" => {
+                    let d = if n == 1 { 0.0 } else { (x - 0.5).abs() * 2.0 }; // 1 segment: just its brightness
+                    if d <= level && level > 0.02 { lvl(mix(a, b2, d / level), 0.3 + 0.7 * level) } else { [0.0; 3] }
+                }
+                // Just the lead note: a bright dot at its pitch with a soft halo.
+                "Lead" => {
+                    let v = lead.as_ref().unwrap();
+                    let dist = (i as f32 - v.at * (n - 1) as f32).abs();
+                    lvl(mix(lvl(b2, (1.0 - dist / 4.0).max(0.0) * 0.35), a, (1.0 - dist).max(0.0)), v.laser)
+                }
                 "Visualizer" => {
                     let (v, shift) = vis.as_ref().unwrap();
                     let g = ((x * GROUPS as f32) as usize).min(GROUPS - 1);
@@ -371,4 +414,29 @@ fn vis_on_song() {
         }
     }
     println!("frames with drop flash: {flashes} of {}", (mono.len() as f64 / track.rate as f64 * 20.0) as usize);
+}
+
+/// Text render of one light in a saved scene: SCENES=file SCENE=n(1-based) DEV=id FROM=s TO=s cargo test light_on_song -- --ignored --nocapture
+/// W white, L lime, G/g green (bright/dim), o other, . dim, space off.
+#[test]
+#[ignore]
+fn light_on_song() {
+    let env = |k: &str| std::env::var(k).unwrap();
+    let scenes: Vec<crate::scene::Scene> = serde_json::from_str(&std::fs::read_to_string(env("SCENES")).unwrap()).unwrap();
+    let sc = &scenes[env("SCENE").parse::<usize>().unwrap() - 1];
+    let (track, mono) = crate::audio::decode(std::path::Path::new(&sc.audio.as_ref().unwrap().path)).unwrap();
+    let an = crate::analysis::analyze(&mono, track.rate);
+    let cx = Ctx { an: Some(&an), bpm: sc.bpm };
+    let tracks: Vec<Track> = sc.tracks.iter().filter(|t| t.dev.as_deref() == Some(&env("DEV"))).cloned().collect();
+    let (from, to): (f64, f64) = (env("FROM").parse().unwrap(), env("TO").parse().unwrap());
+    let mut t = from;
+    while t < to {
+        let row: String = light_colors(&tracks, t, &cx).iter().map(|c| {
+            let [r, g, b] = c.unwrap_or([0.0; 3]);
+            let m = r.max(g).max(b);
+            if m < 20.0 { ' ' } else if m < 60.0 { '.' } else if r.min(g).min(b) > 170.0 { 'W' } else if r > 110.0 && g > 140.0 && b < 90.0 { 'L' } else if g > r && g >= b { if m > 140.0 { 'G' } else { 'g' } } else { 'o' }
+        }).collect();
+        println!("{t:6.2} |{row}|");
+        t += 0.1;
+    }
 }
