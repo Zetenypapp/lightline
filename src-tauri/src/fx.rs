@@ -122,6 +122,22 @@ impl Ctx<'_> {
     }
 }
 
+/// Effects coloured by the clip's colour list (rainbow when it is empty).
+pub const PALETTE_FX: [&str; 3] = ["Spectrum", "Meter", "Visualizer"];
+
+/// Colour at x (0..1) along the clip's colour list; empty list = rainbow.
+fn pal_at(pal: &[[u8; 3]], x: f32) -> Rgb {
+    match pal {
+        [] => hsl(x * 300.0, 100.0, 50.0),
+        [c] => rgb(*c),
+        _ => {
+            let p = x.clamp(0.0, 1.0) * (pal.len() - 1) as f32;
+            let k = (p.floor() as usize).min(pal.len() - 2);
+            mix(rgb(pal[k]), rgb(pal[k + 1]), p - k as f32)
+        }
+    }
+}
+
 pub fn hsl(h: f32, s: f32, l: f32) -> Rgb {
     let (h, s, l) = (h.rem_euclid(360.0), s / 100.0, l / 100.0);
     let a = s * l.min(1.0 - l);
@@ -155,7 +171,7 @@ fn clip_colors(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
     let fade_in = if c.fin > 0.0 { (t - c.start) / c.fin } else { 1.0 };
     let fade_out = if c.fout > 0.0 { (c.start + c.len - t) / c.fout } else { 1.0 };
     let env = (c.bri / 100.0 * fade_in.min(fade_out).min(1.0)).max(0.0) as f32;
-    let vis = (c.fx == "Visualizer").then(|| (cx.vis(t), cx.beat_pos(t).floor() as f32 * 47.0));
+    let vis = (c.fx == "Visualizer").then(|| (cx.vis(t), frac(cx.beat_pos(t).floor() * 0.13) as f32)); // colours shift each beat
     (0..n)
         .map(|j| {
             let i = if c.rev { n - 1 - j } else { j };
@@ -180,12 +196,12 @@ fn clip_colors(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
                 "Strobe" => if frac(b * 4.0) < 0.5 { a } else { [0.0; 3] },
                 "Rainbow" => hsl(i as f32 * 24.0 + p as f32 * 90.0, 90.0, 55.0),
                 "Bass hit" => lvl(a, cx.band(t, 0)),
-                "Spectrum" => lvl(mix(a, b2, x), cx.spec(t, x).powf(1.5)), // ^1.5: quiet bands drop out, peaks pop
-                "Meter" => if x <= (cx.band(t, 0) + cx.band(t, 1) + cx.band(t, 2)) / 3.0 { mix(a, b2, x) } else { [0.0; 3] },
+                "Spectrum" => lvl(pal_at(&c.pal, x), cx.spec(t, x).powf(1.5)), // ^1.5: quiet bands drop out, peaks pop
+                "Meter" => if x <= (cx.band(t, 0) + cx.band(t, 1) + cx.band(t, 2)) / 3.0 { pal_at(&c.pal, x) } else { [0.0; 3] },
                 "Visualizer" => {
-                    let (v, hue) = vis.as_ref().unwrap();
+                    let (v, shift) = vis.as_ref().unwrap();
                     let g = ((x * GROUPS as f32) as usize).min(GROUPS - 1);
-                    let sec = lvl(hsl(hue + g as f32 * (300.0 / GROUPS as f32), 100.0, 50.0), v.hit[g].powf(0.7)); // dark until hit
+                    let sec = lvl(pal_at(&c.pal, (g as f32 / GROUPS as f32 + shift).fract()), v.hit[g].powf(0.7)); // dark until hit
                     // The lead note: 1-2 segments at its pitch, white, over the sections.
                     let beam = (1.0 - (i as f32 - v.at * (n - 1) as f32).abs()).max(0.0) * v.laser;
                     mix(mix(sec, [255.0; 3], beam), [255.0; 3], v.flash)
@@ -209,18 +225,30 @@ pub fn track_colors(tr: &Track, t: f64, cx: &Ctx) -> Vec<Option<Rgb>> {
     out
 }
 
-/// One light's colours: each track lands at its start segment, overlapping tracks layer.
+/// One light's colours: each track lands at its start segment. Where tracks overlap, the higher
+/// track (earlier in the list) wins; its dark parts let the tracks below show through.
 pub fn light_colors(tracks: &[Track], t: f64, cx: &Ctx) -> Vec<Option<Rgb>> {
     let w = tracks.iter().map(|tr| tr.from + tr.segs).max().unwrap_or(0).clamp(1, 84);
     let mut out = vec![None; w];
-    for tr in tracks {
+    for tr in tracks.iter().rev() {
         for (i, c) in track_colors(tr, t, cx).into_iter().enumerate() {
             if let Some(o) = out.get_mut(tr.from + i) {
-                *o = screen(*o, c);
+                *o = over(c, *o);
             }
         }
     }
     out
+}
+
+/// `top` over `below`, using top's brightness as its opacity.
+fn over(top: Option<Rgb>, below: Option<Rgb>) -> Option<Rgb> {
+    match (top, below) {
+        (Some(a), Some(b)) => {
+            let k = 1.0 - a.iter().copied().fold(0.0, f32::max) / 255.0;
+            Some([0, 1, 2].map(|i| a[i] + b[i] * k))
+        }
+        (a, b) => a.or(b),
+    }
 }
 
 /// Glides colour changes so jumps don't look harsh: rises in ~20 ms, falls over the smoothing time.
@@ -265,7 +293,7 @@ mod tests {
     use crate::scene::{Clip, Track};
 
     fn clip(fx: &str, col: [u8; 3]) -> Clip {
-        Clip { fx: fx.into(), start: 0.0, len: 4.0, col, col2: [124, 108, 255], bri: 100.0, speed: 2.0, rev: true, fin: 1.0, fout: 1.0 }
+        Clip { fx: fx.into(), start: 0.0, len: 4.0, col, col2: [124, 108, 255], bri: 100.0, speed: 2.0, rev: true, fin: 1.0, fout: 1.0, pal: vec![] }
     }
 
     #[test]
@@ -294,7 +322,19 @@ mod tests {
         let t = |from, c: &Clip| Track { name: String::new(), segs: 2, from, dev: None, clips: vec![c.clone()] };
         let out = light_colors(&[t(0, &red), t(1, &blue)], 1.0, &cx);
         let px: Vec<[u8; 3]> = out.iter().map(|c| c.unwrap().map(|v| v.round() as u8)).collect();
-        assert_eq!(px, vec![[255, 0, 0], [255, 0, 255], [0, 0, 255]]);
+        assert_eq!(px, vec![[255, 0, 0], [255, 0, 0], [0, 0, 255]], "higher track wins where they overlap");
+        let black = Clip { col: [0, 0, 0], ..red.clone() };
+        let out = light_colors(&[t(0, &black), t(0, &blue)], 1.0, &cx);
+        assert_eq!(out[0].unwrap().map(|v| v.round() as u8), [0, 0, 255], "dark parts of the top track show the one below");
+    }
+
+    #[test]
+    fn colour_list() {
+        let p = [[255, 0, 0], [0, 0, 255]];
+        assert_eq!(pal_at(&p, 0.0), [255.0, 0.0, 0.0]);
+        assert_eq!(pal_at(&p, 0.5), [127.5, 0.0, 127.5]);
+        assert_eq!(pal_at(&p, 1.0), [0.0, 0.0, 255.0]);
+        assert_eq!(pal_at(&[], 0.0), hsl(0.0, 100.0, 50.0));
     }
 
     #[test]
@@ -319,7 +359,7 @@ fn vis_on_song() {
     let (track, mono) = crate::audio::decode(std::path::Path::new(&path)).unwrap();
     let an = crate::analysis::analyze(&mono, track.rate);
     let cx = Ctx { an: Some(&an), bpm: 120.0 };
-    let clip = Clip { fx: "Visualizer".into(), start: 0.0, len: 999.0, col: [0; 3], col2: [0; 3], bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0 };
+    let clip = Clip { fx: "Visualizer".into(), start: 0.0, len: 999.0, col: [0; 3], col2: [0; 3], bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![] };
     let mut flashes = 0;
     for i in 0..(mono.len() as f64 / track.rate as f64 * 20.0) as usize {
         let t = i as f64 / 20.0;

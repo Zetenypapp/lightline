@@ -399,7 +399,7 @@ impl App {
         let h = (self.epoch.elapsed().as_nanos() % 360) as f32;
         let (col, col2) = fx::default_colors(fx).unwrap_or_else(|| (to_u8(fx::hsl(h, 85.0, 58.0)), to_u8(fx::hsl(h + 120.0, 85.0, 58.0))));
         let Some(tr) = self.sc_mut().tracks.get_mut(ti) else { return };
-        tr.clips.push(Clip { fx: fx.into(), start, len, col, col2, bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0 });
+        tr.clips.push(Clip { fx: fx.into(), start, len, col, col2, bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![] });
         let ci = tr.clips.len() - 1;
         (self.sel, self.ti) = (Some((ti, ci)), ti);
     }
@@ -687,7 +687,7 @@ impl App {
                 let mut s = self.sc().clone();
                 s.name = format!("{} (auto)", s.name);
                 for (k, tr) in s.tracks.iter_mut().enumerate() {
-                    tr.clips = vec![Clip { fx: "Visualizer".into(), start: 0.0, len: s.len, col: [0; 3], col2: [0; 3], bri: 100.0, speed: 1.0, rev: k % 2 == 1, fin: 0.0, fout: 0.0 }];
+                    tr.clips = vec![Clip { fx: "Visualizer".into(), start: 0.0, len: s.len, col: [0; 3], col2: [0; 3], bri: 100.0, speed: 1.0, rev: k % 2 == 1, fin: 0.0, fout: 0.0, pal: vec![] }];
                 }
                 self.scenes.push(s);
                 self.dirty = true;
@@ -716,7 +716,7 @@ impl App {
         egui::Grid::new("fx").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
             for (i, fxn) in EFFECTS.iter().enumerate() {
                 let (col, col2) = fx::default_colors(fxn).unwrap_or(([0x2f, 0xd8, 0xb4], [0x7c, 0x6c, 0xff]));
-                let demo = Track { name: String::new(), segs: 8, from: 0, dev: None, clips: vec![Clip { fx: fxn.to_string(), start: 0.0, len: 1e9, col, col2, bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0 }] };
+                let demo = Track { name: String::new(), segs: 8, from: 0, dev: None, clips: vec![Clip { fx: fxn.to_string(), start: 0.0, len: 1e9, col, col2, bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![] }] };
                 let clicked = ui.dnd_drag_source(ui.scope_id().with(("fx", i)), Drop::Fx(fxn), |ui| {
                     let (r, resp) = ui.allocate_exact_size(Vec2::new(98.0, 66.0), Sense::click());
                     ui.painter().rect_filled(r, 12, if resp.hovered() { PANEL3 } else { PANEL2 });
@@ -773,12 +773,39 @@ impl App {
                 changed |= ui.selectable_value(&mut c.fx, f.to_string(), f).changed();
             }
         });
-        ui.horizontal(|ui| {
-            ui.label("Colour 1");
-            changed |= ui.color_edit_button_srgb(&mut c.col).changed();
-            ui.label("Colour 2");
-            changed |= ui.color_edit_button_srgb(&mut c.col2).changed();
-        });
+        if fx::PALETTE_FX.contains(&c.fx.as_str()) {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Colours");
+                if c.pal.is_empty() {
+                    ui.label(RichText::new("Rainbow").color(ACCENT));
+                    if ui.button("Custom").on_hover_text("Pick your own colours, blended along the strip").clicked() {
+                        (c.pal, changed) = (vec![c.col, c.col2], true);
+                    }
+                } else {
+                    for col in c.pal.iter_mut() {
+                        changed |= ui.color_edit_button_srgb(col).changed();
+                    }
+                    if c.pal.len() < 12 && ui.button("+").on_hover_text("Add a colour").clicked() {
+                        c.pal.push(*c.pal.last().unwrap());
+                        changed = true;
+                    }
+                    if ui.button("−").on_hover_text("Remove the last colour").clicked() {
+                        c.pal.pop();
+                        changed = true;
+                    }
+                    if ui.button("Rainbow").clicked() {
+                        (c.pal, changed) = (vec![], true);
+                    }
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.label("Colour 1");
+                changed |= ui.color_edit_button_srgb(&mut c.col).changed();
+                ui.label("Colour 2");
+                changed |= ui.color_edit_button_srgb(&mut c.col2).changed();
+            });
+        }
         changed |= ui.add(egui::Slider::new(&mut c.bri, 0.0..=100.0).text("Brightness").suffix("%")).changed();
         egui::ComboBox::from_label("Speed").selected_text(format!("{}×", c.speed)).show_ui(ui, |ui| {
             for s in [0.25, 0.5, 1.0, 2.0, 4.0] {
@@ -1151,7 +1178,13 @@ impl App {
                 }
             }
 
-            // Playhead.
+            // Playhead: grab it anywhere along its line (registered last, so it wins over lanes and clips).
+            let px = x_of(self.t);
+            let grip = Rect::from_min_max(Pos2::new(px - 6.0, o.y), Pos2::new(px + 6.0, rect.bottom()));
+            let ph = ui.interact(grip, ui.scope_id().with("playhead"), Sense::drag()).on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+            if let Some(pp) = ph.interact_pointer_pos().filter(|_| ph.dragged()) {
+                self.seek(t_of(pp.x));
+            }
             let px = x_of(self.t);
             p.line_segment([Pos2::new(px, o.y), Pos2::new(px, rect.bottom())], Stroke::new(2.0, ACCENT));
             p.circle_filled(Pos2::new(px, o.y + 5.0), 6.0, ACCENT);

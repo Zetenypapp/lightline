@@ -24,6 +24,9 @@ pub struct Clip {
     pub fin: f64,
     #[serde(default)]
     pub fout: f64,
+    /// Colours for the music effects (Spectrum, Meter, Visualizer), blended along the strip. Empty = rainbow.
+    #[serde(default, with = "hexes")]
+    pub pal: Vec<[u8; 3]>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -89,8 +92,22 @@ mod hex {
     }
 }
 
+mod hexes {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    pub fn serialize<S: Serializer>(v: &[[u8; 3]], s: S) -> Result<S::Ok, S::Error> {
+        v.iter().map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])).collect::<Vec<_>>().serialize(s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<[u8; 3]>, D::Error> {
+        let v = Vec::<String>::deserialize(d)?;
+        Ok(v.iter().map(|s| {
+            let h = |i: usize| s.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok()).unwrap_or(0);
+            [h(1), h(3), h(5)]
+        }).collect())
+    }
+}
+
 pub fn demo() -> Scene {
-    let clip = |fx: &str, start: f64, len: f64, col: [u8; 3]| Clip { fx: fx.into(), start, len, col, col2: purple(), bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0 };
+    let clip = |fx: &str, start: f64, len: f64, col: [u8; 3]| Clip { fx: fx.into(), start, len, col, col2: purple(), bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![] };
     let track = |name: &str, clips| Track { name: name.into(), segs: 15, from: 0, dev: None, clips };
     Scene {
         name: "Demo scene".into(),
@@ -161,6 +178,11 @@ mod tests {
         assert_eq!((s[0].tracks[1].from, s[0].tracks[1].dev.as_deref()), (4, None));
         let back = serde_json::to_string(&s).unwrap();
         assert!(back.contains("\"col\":\"#ff8000\""));
+        assert!(c.pal.is_empty(), "old files: rainbow");
+        let mut c = c.clone();
+        c.pal = vec![[255, 0, 0], [0, 16, 255]];
+        let back: super::Clip = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.pal, c.pal);
     }
 
     #[test]
