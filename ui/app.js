@@ -19,7 +19,10 @@ const demo = () => ({ name: 'Demo scene', len: 60, bpm: 120, tracks: [
   { name: 'Neon', segs: 12, clips: [{ fx: 'Gradient', start: 0, len: 24, hue: 260 }, { fx: 'Strobe', start: 40, len: 4, hue: 0 }] },
 ] });
 
-const S = { page: 'home', devices: [], scanning: false, msg: '', scenes: migrate([demo()]), cur: 0, sel: null, t: 0, playing: false, snap: true, bri: 100, black: false, noSave: false, an: null, anPath: '', loading: '', zoom: 1, ti: 0, blink: new Set(), off: pref('off', 0), smooth: pref('smooth', 40) };
+const S = { page: 'home', devices: [], scanning: false, msg: '', scenes: migrate([demo()]), cur: 0, sel: null, t: 0, playing: false, snap: true, bri: 100, black: false, noSave: false, an: null, anPath: '', loading: '', zoom: 1, ti: 0, blink: new Set(), off: pref('off', 0), smooth: pref('smooth', 40), names: prefJson('names') };
+function prefJson(k) { try { return JSON.parse(localStorage.getItem(k)) || {}; } catch { return {}; } }
+const devName = (d) => S.names[d.device] || d.sku;
+const trackLight = (tr) => { const d = tr.dev && S.devices.find((x) => x.device === tr.dev); return d ? devName(d) : tr.dev ? 'Light not found' : 'No light'; };
 // Per-PC settings (light delay, smoothing): fine in browser storage, but it may be unavailable.
 function pref(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : +v; } catch { return d; } }
 function setPref(k, v) { try { localStorage.setItem(k, v); } catch { /* not saved, still applies now */ } }
@@ -172,7 +175,7 @@ const V = {
   <div class="head"><div><h1>Your lights</h1><p class="muted">Build scenes on a timeline, sync them to music, play them live.</p></div>
     <div class="row"><button class="btn" data-act="scan" ${S.scanning ? 'disabled' : ''}>${S.scanning ? 'Scanning…' : 'Scan network'}</button></div></div>
   <h2 class="label">Devices</h2>
-  <div class="grid">${S.devices.map((d) => `<article class="card"><div class="split"><div><strong>${esc(d.sku)}</strong><div class="muted small">${esc(d.ip)}</div></div><span class="small muted"><i class="dot"></i>Online</span></div><div class="segs">${segs(Array(12).fill(''))}</div><button class="btn${S.blink.has(d.ip) ? ' primary' : ''}" data-act="identify" data-ip="${esc(d.ip)}" aria-pressed="${S.blink.has(d.ip)}">${S.blink.has(d.ip) ? 'Stop blinking' : 'Identify (blink)'}</button></article>`).join('')
+  <div class="grid">${S.devices.map((d) => `<article class="card"><div class="split"><div><input class="title" style="width:100%" aria-label="Light name" value="${esc(devName(d))}" placeholder="${esc(d.sku)}" data-in="dname" data-dev="${esc(d.device)}"><div class="muted small">${esc(d.sku)} · ${esc(d.ip)}</div></div><span class="small muted"><i class="dot"></i>Online</span></div><div class="segs">${segs(Array(12).fill(''))}</div><button class="btn${S.blink.has(d.ip) ? ' primary' : ''}" data-act="identify" data-ip="${esc(d.ip)}" aria-pressed="${S.blink.has(d.ip)}">${S.blink.has(d.ip) ? 'Stop blinking' : 'Identify (blink)'}</button></article>`).join('')
     || `<article class="card"><span class="muted">${esc(S.msg || (S.scanning ? 'Looking for lights…' : 'No lights found. Turn on LAN Control for each light in the Govee Home app, then scan again.'))}</span></article>`}</div>
   <h2 class="label">Scenes</h2>
   <div class="grid"><button class="card newtile" data-act="newScene"><span class="plus" aria-hidden="true">+</span>New scene</button>${S.scenes.map((s, i) => `<article class="card"><div class="segs thumb">${segs(colorsAt(s.tracks[0] ?? EMPTY, s.len / 3))}</div>
@@ -192,8 +195,8 @@ const V = {
   </div>
   <div class="panes">
     <aside class="lib"><h2 class="label">Effects</h2><div class="fxgrid">${EFFECTS.map((fx) => `<button class="fxtile" data-act="add" data-fx="${fx}"><span class="segs">${segs(colorsAt({ segs: 8, clips: [{ fx, start: 0, len: 1e9, col: FX_COLORS[fx]?.[0] ?? '#2fd8b4', col2: FX_COLORS[fx]?.[1] ?? '#7c6cff' }] }, 0.7))}</span>${fx}</button>`).join('')}</div><p class="muted small">Drag an effect onto a track, or click to add it at the playhead on the selected track.</p>
-      <h2 class="label" style="margin-top:8px">Lights</h2>${S.devices.map((d) => `<button class="devitem" data-act="assign" data-dev="${esc(d.device)}"><i class="dot"></i>${esc(d.sku)}<span class="muted small">${esc(d.ip)}</span></button>`).join('') || '<p class="muted small">No lights found yet.</p>'}
-      <p class="muted small">Drag a light onto a track, or click to give it to the selected track.</p></aside>
+      <h2 class="label" style="margin-top:8px">Lights</h2>${S.devices.map((d) => `<button class="devitem" data-dev="${esc(d.device)}"><i class="dot"></i>${esc(devName(d))}<span class="muted small">${esc(d.ip)}</span></button>`).join('') || '<p class="muted small">No lights found yet.</p>'}
+      <p class="muted small">Drag a light onto a track to give that track the light.</p></aside>
     <section class="stage" id="stage" aria-label="Preview">${stage()}</section>
     <aside class="insp">${c ? inspector(c) : '<h2 class="label">Clip</h2><p class="muted small">Select a clip on the timeline.</p>'}${trackPanel()}${outputPanel()}</aside>
   </div>
@@ -242,7 +245,7 @@ const trackPanel = () => {
   const shared = tr.dev ? sc().tracks.filter((x) => x !== tr && x.dev === tr.dev && (x.from ?? 0) < end(tr) && (tr.from ?? 0) < end(x)) : [];
   const total = tr.dev ? Math.max(...sc().tracks.filter((x) => x.dev === tr.dev).map((x) => (x.from ?? 0) + x.segs)) : 0;
   return `<h2 class="label" style="margin-top:8px">Track · ${esc(tr.name)}</h2>
-<label class="field">Light<select data-in="tdev"><option value="">None (preview only)</option>${S.devices.map((d) => `<option value="${esc(d.device)}"${d.device === tr.dev ? ' selected' : ''}>${esc(d.sku)} · ${esc(d.ip)}</option>`).join('')}${offline ? `<option value="${esc(tr.dev)}" selected>Light not found</option>` : ''}</select></label>
+<label class="field">Light<select data-in="tdev"><option value="">None (preview only)</option>${S.devices.map((d) => `<option value="${esc(d.device)}"${d.device === tr.dev ? ' selected' : ''}>${esc(devName(d))} · ${esc(d.ip)}</option>`).join('')}${offline ? `<option value="${esc(tr.dev)}" selected>Light not found</option>` : ''}</select></label>
 <div class="row"><label class="field" style="flex:1">Starts at segment<input type="number" min="1" max="84" value="${(tr.from ?? 0) + 1}" data-in="tfrom"></label><label class="field" style="flex:1">Segments<input type="number" min="1" max="84" value="${tr.segs}" data-in="tsegs"></label></div>
 ${shared.length ? `<p class="warn small">Layered on the same segments with: ${shared.map((x) => esc(x.name)).join(', ')}. Their colours mix. Change "Starts at segment" to split them into zones.</p>` : ''}
 ${total > 84 ? `<p class="warn small">Tracks on this light reach segment ${total}, but it takes at most 84. Segments after 84 are cut off.</p>` : ''}
@@ -256,7 +259,7 @@ function timeline() {
   const ticks = Array.from({ length: Math.ceil(s.len / step) }, (_, i) => `<span style="left:${pct(i * step)}">${step < 1 ? fmt(i * step) : fmt(i * step).slice(0, -2)}</span>`).join('');
   return `<div class="tlbody" style="width:calc(192px + (100% - 192px) * ${S.zoom})"><div class="ruler" data-seek>${ticks}</div>
 ${S.an ? `<div class="track audio"><div class="thead"><i style="background:var(--accent2)"></i><span class="tname">${esc(s.audio.name)}</span></div><div class="lane" data-seek><canvas id="wave" aria-label="Music waveform with beat lines"></canvas></div></div>` : ''}
-${s.tracks.map((tr, ti) => `<div class="track" data-ti="${ti}"><div class="thead${ti === S.ti ? ' on' : ''}"><button class="tdot" data-act="track" data-ti="${ti}" aria-label="Track settings" title="Track settings" style="background:hsl(${160 + ti * 70} 70% 60%)"></button><input class="tname" aria-label="Track name" value="${esc(tr.name)}" data-in="tname" data-ti="${ti}"></div><div class="lane" data-seek data-ti="${ti}">${tr.clips.map((c, ci) => `<button class="clip${S.sel?.ti === ti && S.sel?.ci === ci ? ' sel' : ''}" data-act="sel" data-ti="${ti}" data-ci="${ci}" style="left:${pct(c.start)};width:${pct(c.len)};background:${c.col};color:${ink(c.col)}">${c.fx}</button>`).join('')}</div></div>`).join('')}
+${s.tracks.map((tr, ti) => `<div class="track" data-ti="${ti}"><div class="thead${ti === S.ti ? ' on' : ''}"><button class="tdot" data-act="track" data-ti="${ti}" aria-label="Track settings" title="Track settings" style="background:hsl(${160 + ti * 70} 70% 60%)"></button><div class="tmeta"><input class="tname" aria-label="Track name" value="${esc(tr.name)}" data-in="tname" data-ti="${ti}"><span class="tlight">${esc(trackLight(tr))}</span></div></div><div class="lane" data-seek data-ti="${ti}">${tr.clips.map((c, ci) => `<button class="clip${S.sel?.ti === ti && S.sel?.ci === ci ? ' sel' : ''}" data-act="sel" data-ti="${ti}" data-ci="${ci}" style="left:${pct(c.start)};width:${pct(c.len)};background:${c.col};color:${ink(c.col)}">${c.fx}</button>`).join('')}</div></div>`).join('')}
 <div class="phwrap"><div id="playhead" style="left:${pct(S.t)}"></div></div></div>`;
 }
 
@@ -503,6 +506,7 @@ document.addEventListener('input', (e) => {
     case 'off': S.off = v; setPref('off', v); $('#offv').textContent = `${v > 0 ? '+' : ''}${v}`; return;
     case 'smooth': S.smooth = v; setPref('smooth', v); $('#smoothv').textContent = v * 3; return;
     case 'zoom': setZoom(2 ** v); return;
+    case 'dname': if (v.trim()) S.names[el.dataset.dev] = v.trim(); else delete S.names[el.dataset.dev]; setPref('names', JSON.stringify(S.names)); return;
     case 'tdev': s.tracks[S.ti].dev = v; save(); render(); return; // render: refresh the layering note
     case 'tfrom': if (v < 1 || v > 84) return; s.tracks[S.ti].from = Math.round(v) - 1; save(); return;
     case 'tsegs': if (v < 1 || v > 84) return; s.tracks[S.ti].segs = Math.round(v); paint(); save(); return; // warning updates on next render
