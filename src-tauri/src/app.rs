@@ -104,7 +104,8 @@ pub struct App {
     committed: Vec<Scene>, // scenes as of the last finished edit
     clip_board: Option<Clip>,
     flash: bool,
-    palette: usize,
+    build_open: bool,
+    build_opts: show::Opts,
 }
 
 impl App {
@@ -156,7 +157,8 @@ impl App {
             committed: vec![],
             clip_board: None,
             flash: false,
-            palette: 0,
+            build_open: false,
+            build_opts: show::Opts::default(),
         };
         app.committed = app.scenes.clone();
         app.scan(&cc.egui_ctx);
@@ -440,6 +442,81 @@ impl App {
         (self.sel, self.dirty) = (None, true);
     }
 
+    /// The "Build show" window: colours, speed, focus, strobes; each Build makes a new variation.
+    fn build_window(&mut self, ctx: &egui::Context) {
+        if !self.build_open {
+            return;
+        }
+        let Some(an) = self.an.clone() else {
+            self.build_open = false;
+            return;
+        };
+        let mut o = self.build_opts;
+        let (mut open, mut go) = (true, false);
+        egui::Window::new("Build a light show").open(&mut open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            ui.label(RichText::new("Colours").color(MUTED));
+            ui.horizontal_wrapped(|ui| {
+                for (i, (name, cols)) in show::PALETTES.iter().enumerate() {
+                    let r = ui.add(egui::Button::selectable(o.pal == i, format!("        {name}")));
+                    for (k, c) in cols.iter().enumerate() {
+                        let sw = Rect::from_min_size(r.rect.left_center() + Vec2::new(8.0 + k as f32 * 7.0, -6.0), Vec2::new(6.0, 12.0));
+                        ui.painter().rect_filled(sw, 2, Color32::from_rgb(c[0], c[1], c[2]));
+                    }
+                    if r.clicked() {
+                        o.pal = i;
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            ui.label(RichText::new("Speed").color(MUTED));
+            ui.horizontal(|ui| {
+                for (i, n) in show::SPEEDS.iter().enumerate() {
+                    ui.selectable_value(&mut o.speed, i, *n);
+                }
+            });
+            ui.add_space(8.0);
+            ui.label(RichText::new("Focus on").color(MUTED));
+            ui.horizontal(|ui| {
+                for (i, n) in show::FOCUS.iter().enumerate() {
+                    ui.selectable_value(&mut o.focus, i, *n);
+                }
+            });
+            ui.add_space(8.0);
+            ui.checkbox(&mut o.strobes, "Strobes");
+            ui.checkbox(&mut o.same, "Same pattern on every light");
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                go = accent_button(ui, "Build").on_hover_text("Each build is a new variation").clicked();
+                ui.label(RichText::new("Makes a new scene; this one stays as it is.").color(MUTED).small());
+            });
+        });
+        self.build_opts = o;
+        self.build_open = open && !go;
+        if !go {
+            return;
+        }
+        let mut ids: Vec<String> = vec![];
+        for id in self.sc().tracks.iter().filter_map(|t| t.dev.clone()) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        if ids.is_empty() {
+            ids = self.devices.iter().map(|d| d.id.clone()).collect();
+        }
+        let lights: Vec<(String, String, usize)> = ids.iter().map(|id| {
+            let name = self.devices.iter().find(|d| &d.id == id).map_or(id.clone(), |d| self.dev_name(d));
+            (name, id.clone(), self.full_segs(id))
+        }).collect();
+        o.seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
+        let mut s = self.sc().clone();
+        s.name = format!("{} ({} · {} · {})", s.name, show::PALETTES[o.pal].0, show::SPEEDS[o.speed], show::FOCUS[o.focus]);
+        s.tracks = show::build(&an, s.len, &lights, o);
+        self.scenes.push(s);
+        self.dirty = true;
+        self.open(ctx, self.scenes.len() - 1, Page::Editor);
+    }
+
     fn sel_clip(&mut self) -> Option<&mut Clip> {
         let (ti, ci) = self.sel?;
         self.dirty = true;
@@ -707,6 +784,7 @@ impl App {
     }
 
     fn editor(&mut self, ui: &mut Ui) {
+        self.build_window(&ui.ctx().clone());
         let ctx = ui.ctx().clone();
         let bar = Frame::new().fill(PANEL).inner_margin(Margin::symmetric(14, 8));
         egui::Panel::top("tools").frame(bar).show(ui, |ui| ui.horizontal(|ui| self.toolbar(ui, &ctx)));
@@ -764,34 +842,8 @@ impl App {
             let pulse = 1.0 - self.cx().beat_pos(self.t).rem_euclid(1.0) as f32;
             ui.label(RichText::new("●").color(ACCENT.gamma_multiply(0.25 + 0.75 * pulse)));
             ui.label(RichText::new(format!("{} BPM · {} beats", an.bpm, an.beats.len())).color(ACCENT));
-            let an = an.clone();
-            let mut pi = self.palette;
-            egui::ComboBox::from_id_salt("palette").selected_text(show::PALETTES[pi].0).show_ui(ui, |ui| {
-                for (i, (n, _)) in show::PALETTES.iter().enumerate() {
-                    ui.selectable_value(&mut pi, i, *n);
-                }
-            });
-            self.palette = pi;
-            if ui.button("Build show").on_hover_text("New scene with a layered light show for this song, in these colours").clicked() {
-                let mut ids: Vec<String> = vec![];
-                for id in self.sc().tracks.iter().filter_map(|t| t.dev.clone()) {
-                    if !ids.contains(&id) {
-                        ids.push(id);
-                    }
-                }
-                if ids.is_empty() {
-                    ids = self.devices.iter().map(|d| d.id.clone()).collect();
-                }
-                let lights: Vec<(String, String, usize)> = ids.iter().map(|id| {
-                    let name = self.devices.iter().find(|d| &d.id == id).map_or(id.clone(), |d| self.dev_name(d));
-                    (name, id.clone(), self.full_segs(id))
-                }).collect();
-                let mut s = self.sc().clone();
-                s.name = format!("{} (show)", s.name);
-                s.tracks = show::build(&an, s.len, &lights, show::PALETTES[pi].1);
-                self.scenes.push(s);
-                self.dirty = true;
-                self.open(ctx, self.scenes.len() - 1, Page::Editor);
+            if ui.button("Build show…").on_hover_text("Make a light show for this song: pick colours, speed and focus").clicked() {
+                self.build_open = true;
             }
         }
         ui.add_space(12.0);
