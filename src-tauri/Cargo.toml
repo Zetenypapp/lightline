@@ -3,16 +3,14 @@ name = "lightline"
 version = "0.1.0"
 edition = "2021"
 
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
-
 [dependencies]
-tauri = { version = "2", features = [] }
 serde_json = "1"
 symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "alac"] }
 rustfft = "6"
 cpal = "0.15"
 rfd = "0.15"
+eframe = { version = "0.37", default-features = false, features = ["glow", "accesskit", "clipboard", "default_fonts"] }
+serde = { version = "1.0.229", features = ["derive"] }
 
 [profile.dev]
 opt-level = 1

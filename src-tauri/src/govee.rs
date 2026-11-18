@@ -103,27 +103,30 @@ pub fn b64(data: &[u8]) -> String {
     s
 }
 
-pub fn unb64(s: &str) -> Result<Vec<u8>, String> {
-    let val = |c: u8| -> Result<u32, String> {
-        Ok(match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return Err("Bad base64 data".into()),
-        } as u32)
-    };
-    let s = s.trim_end_matches('=').as_bytes();
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
-    for c in s.chunks(4) {
-        let mut n = 0u32;
-        for (i, &ch) in c.iter().enumerate() {
-            n |= val(ch)? << (18 - 6 * i);
-        }
-        out.extend_from_slice(&n.to_be_bytes()[1..c.len()]);
+static BLINKING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Starts or stops blinking a light so you can tell which one it is. Stopping turns it back on.
+pub fn identify(ip: &str, on: bool) -> Result<(), String> {
+    let mut set = BLINKING.lock().unwrap();
+    let was = set.iter().any(|x| x == ip);
+    set.retain(|x| x != ip);
+    if !on {
+        return turn(ip, true);
     }
-    Ok(out)
+    set.push(ip.to_string());
+    if !was {
+        let ip = ip.to_string();
+        std::thread::spawn(move || {
+            let ms = Duration::from_millis(400);
+            while BLINKING.lock().unwrap().contains(&ip) {
+                let _ = turn(&ip, false);
+                std::thread::sleep(ms);
+                let _ = turn(&ip, true);
+                std::thread::sleep(ms);
+            }
+        });
+    }
+    Ok(())
 }
 
 fn parse(reply: &[u8]) -> Option<Value> {
@@ -155,8 +158,5 @@ mod tests {
         // Known "enable real-time mode" packet used by DreamView clients.
         assert_eq!(super::razer(&[0xBB, 0x00, 0x01, 0xB1, 0x01])["msg"]["data"]["pt"], "uwABsQEK");
         assert_eq!(super::b64(b"ab"), "YWI=");
-        for data in [&b""[..], b"a", b"ab", b"abc", b"abcd", &[0, 255, 7, 128, 64]] {
-            assert_eq!(super::unb64(&super::b64(data)).unwrap(), data);
-        }
     }
 }

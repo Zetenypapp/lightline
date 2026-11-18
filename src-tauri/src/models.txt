@@ -1,6 +1,3 @@
-// Govee models: code|name|length|segments shown in the Govee app (a safe starting "Max segments";
-// lights often accept more over LAN). Source: user-supplied sheet, 2026-11-18.
-window.MODELS = `
 H6102|RGBIC LED Strip (Bluetooth)|5 m|15
 H6104|TV LED Backlight (older strip)|3 m|1
 H610A|RGBIC LED Strip (Bluetooth)|10 m|15
@@ -91,4 +88,3 @@ H606A|Hexagon Panels Ultra|10 panels|10
 H6087|Indoor Wall Sconces|2 sconces|2
 H6088|RGBIC Cube Wall Sconces|6 sconces|6
 H6089|Indoor Wall Sconces|2 sconces|2
-`;
