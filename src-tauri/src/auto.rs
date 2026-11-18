@@ -1,13 +1,15 @@
-//! "Auto show": fills a scene's tracks from the song analysis. Calm effects in quiet parts,
-//! busy multi-colour beat effects in loud parts, a one-bar strobe on each drop.
+//! "Auto show": fills a scene's tracks from the song analysis. Moving effects in quiet parts,
+//! busy multi-colour beat effects in loud parts, a one-bar strobe on each drop. Effect and colours
+//! change every 4 bars, and every track gets its own.
 
 use crate::analysis::Analysis;
 use crate::fx::hsl;
 use crate::scene::{Clip, Track};
 
-const CALM: [&str; 3] = ["Breathe", "Wave", "Gradient"];
-const MID: [&str; 4] = ["Chase", "Pulse", "Comet", "Spectrum"];
-const LOUD: [&str; 5] = ["Rainbow", "Alternate", "Beat flash", "Sparkle", "Spectrum"];
+const CALM: [&str; 4] = ["Wave", "Comet", "Spectrum", "Sparkle"];
+const MID: [&str; 5] = ["Chase", "Spectrum", "Comet", "Alternate", "Meter"];
+const LOUD: [&str; 5] = ["Rainbow", "Alternate", "Sparkle", "Spectrum", "Chase"];
+const PHRASE: usize = 4; // bars
 
 /// Bar start times: the downbeats if found, else every 4th beat.
 fn bars(an: &Analysis) -> Vec<f64> {
@@ -45,30 +47,31 @@ pub fn fill(an: &Analysis, len: f64, tracks: &mut [Track]) {
     for tr in tracks.iter_mut() {
         tr.clips.clear();
     }
-    let (mut i, mut sec) = (0, 0);
+    let (mut i, mut ph) = (0, 0);
     while i < lvl.len() {
         let mut j = i + 1;
         while j < lvl.len() && lvl[j] == lvl[i] {
             j += 1;
         }
         let drop = lvl[i] == 2 && i > 0 && e[i] - e[i - 1] > 0.12;
-        for (k, tr) in tracks.iter_mut().enumerate() {
-            let h = (sec * 67 + k * 120) as f32;
-            let c = |h: f32| hsl(h, 95.0, 55.0).map(|v| v.round() as u8);
-            let (fx, bri, speed) = match lvl[i] {
-                0 => (CALM[(sec + k) % CALM.len()], 60.0, 0.5),
-                1 => (MID[(sec + k) % MID.len()], 85.0, 1.0),
-                _ => (LOUD[(sec + k) % LOUD.len()], 100.0, 1.0),
-            };
-            let clip = |fx: &str, start: f64, end: f64| Clip { fx: fx.into(), start, len: end - start, col: c(h), col2: c(h + 150.0), bri, speed, rev: k % 2 == 1, fin: 0.0, fout: 0.0 };
-            let mut start = cuts[i];
-            if drop && j - i > 1 {
-                tr.clips.push(clip("Strobe", start, cuts[i + 1]));
-                start = cuts[i + 1];
+        let (pool, bri, speed): (&[&str], f64, f64) = match lvl[i] {
+            0 => (&CALM, 60.0, 0.5),
+            1 => (&MID, 85.0, 1.0),
+            _ => (&LOUD, 100.0, 1.0),
+        };
+        let mut b = i;
+        while b < j {
+            let strobe = drop && b == i && j - i > 1;
+            let end = if strobe { b + 1 } else { (b + PHRASE).min(j) };
+            for (k, tr) in tracks.iter_mut().enumerate() {
+                let h = (ph * 53 + k * 137) as f32; // 137°: no two tracks land on the same colour
+                let c = |h: f32| hsl(h, 95.0, 55.0).map(|v| v.round() as u8);
+                let fx = if strobe { "Strobe" } else { pool[(ph + k) % pool.len()] };
+                tr.clips.push(Clip { fx: fx.into(), start: cuts[b], len: cuts[end] - cuts[b], col: c(h), col2: c(h + 150.0), bri, speed, rev: (ph + k) % 2 == 1, fin: 0.0, fout: 0.0 });
             }
-            tr.clips.push(clip(fx, start, cuts[j]));
+            (b, ph) = (end, ph + 1);
         }
-        (i, sec) = (j, sec + 1);
+        i = j;
     }
 }
 
@@ -84,7 +87,7 @@ mod tests {
         let beats: Vec<f64> = (0..128).map(|b| b as f64 * 0.5).collect();
         let an = Analysis { bpm: 120.0, beats, downbeats: vec![], fps, lag: 0.0, bands, spec: vec![] };
         let tr = |n: &str| Track { name: n.into(), segs: 15, from: 0, dev: None, clips: vec![] };
-        let mut t = vec![tr("A"), tr("B")];
+        let mut t = vec![tr("A"), tr("B"), tr("C"), tr("D")];
         fill(&an, 64.0, &mut t);
         for tr in &t {
             assert!(CALM.contains(&tr.clips[0].fx.as_str()));
@@ -94,5 +97,24 @@ mod tests {
             assert!(LOUD.contains(&tr.clips.last().unwrap().fx.as_str()));
         }
         assert_ne!(t[0].clips.last().unwrap().fx, t[1].clips.last().unwrap().fx, "tracks differ");
+        assert_ne!(t[0].clips[0].col, t[3].clips[0].col, "tracks 1 and 4 differ in colour");
+        assert!(t[0].clips.iter().all(|c| c.len <= 4.0 * 2.0 + 1e-9), "new pattern every 4 bars");
+
+    }
+
+    /// Prints the show for a real song: cargo test auto_on_song -- --ignored --nocapture (SONG=path)
+    #[test]
+    #[ignore]
+    fn auto_on_song() {
+        let path = std::env::var("SONG").unwrap();
+        let (track, mono) = crate::audio::decode(std::path::Path::new(&path)).unwrap();
+        let an = crate::analysis::analyze(&mono, track.rate);
+        let len = mono.len() as f64 / track.rate as f64;
+        let tr = |n: &str| Track { name: n.into(), segs: 84, from: 0, dev: None, clips: vec![] };
+        let mut t = vec![tr("A"), tr("B"), tr("C"), tr("D")];
+        fill(&an, len, &mut t);
+        for (a, d) in t[0].clips.iter().zip(&t[3].clips) {
+            println!("{:6.1} {:5.1}  {:<10} {:<10} {:?} {:?}", a.start, a.len, a.fx, d.fx, a.col, d.col);
+        }
     }
 }
