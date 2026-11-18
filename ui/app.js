@@ -3,7 +3,8 @@ const invoke = window.__TAURI__?.core?.invoke ?? (() => Promise.reject('Open thi
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const fmt = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
-const EFFECTS = ['Solid', 'Gradient', 'Chase', 'Pulse', 'Rainbow', 'Strobe', 'Bass hit', 'Spectrum'];
+const EFFECTS = ['Solid', 'Gradient', 'Chase', 'Pulse', 'Breathe', 'Wave', 'Comet', 'Sparkle', 'Fire', 'Alternate', 'Beat flash', 'Strobe', 'Rainbow', 'Bass hit', 'Spectrum'];
+const FX_COLORS = { Fire: ['#ff2a00', '#ffb020'], Comet: ['#2fd8b4', '#ffffff'], Sparkle: ['#1a2a6c', '#ffffff'], Strobe: ['#ffffff', '#000000'] };
 const AUDIO_EXT = /\.(mp3|wav|flac|ogg|m4a|aac)$/i;
 const ICON = {
   play: '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4l13 8-13 8z" fill="currentColor"/></svg>',
@@ -18,7 +19,7 @@ const demo = () => ({ name: 'Demo scene', len: 60, bpm: 120, tracks: [
   { name: 'Neon', segs: 12, clips: [{ fx: 'Gradient', start: 0, len: 24, hue: 260 }, { fx: 'Strobe', start: 40, len: 4, hue: 0 }] },
 ] });
 
-const S = { page: 'home', devices: [], scanning: false, msg: '', scenes: [demo()], cur: 0, sel: null, t: 0, playing: false, snap: true, bri: 100, black: false, noSave: false, an: null, anPath: '', loading: '', zoom: 1, ti: 0, blink: new Set() };
+const S = { page: 'home', devices: [], scanning: false, msg: '', scenes: migrate([demo()]), cur: 0, sel: null, t: 0, playing: false, snap: true, bri: 100, black: false, noSave: false, an: null, anPath: '', loading: '', zoom: 1, ti: 0, blink: new Set() };
 const sc = () => S.scenes[S.cur];
 const beat = () => 60 / (S.an?.bpm || sc().bpm);
 // Fractional beat index at time t, from the detected beat grid when there is one.
@@ -49,22 +50,49 @@ function hsl(h, s, l) {
   return [f(0), f(8), f(4)];
 }
 
+function hex(c) { return `#${c.map((v) => v.toString(16).padStart(2, '0')).join('')}`; }
+const rgbOf = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) || 0);
+const ink = (h) => { const [r, g, b] = rgbOf(h); return 0.299 * r + 0.587 * g + 0.114 * b > 140 ? '#10121a' : '#ffffff'; };
+// Old clips stored one hue; now clips have two colours.
+function migrate(scenes) {
+  for (const s of scenes) for (const tr of s.tracks) for (const c of tr.clips) {
+    c.col ??= hex(hsl(c.hue ?? 0, 85, 58)); c.col2 ??= hex(hsl((c.hue ?? 0) + 120, 85, 58)); delete c.hue;
+  }
+  return scenes;
+}
+const frac = (v) => ((v % 1) + 1) % 1;
+const mix = (a, b, f) => a.map((v, k) => v + (b[k] - v) * f);
+const lvl = (c, f) => c.map((v) => v * f);
+const rnd = (a, b) => frac(Math.sin(a * 12.9898 + b * 78.233) * 43758.5453); // stable pseudo-random per segment+time step
+
 // shortcut: colours are computed in JS for both preview and lights; move to Rust if 30 fps ever costs too much CPU.
 function colorsAt(tr, t) {
   const n = tr.segs, c = !S.black && tr.clips.find((k) => t >= k.start && t < k.start + k.len);
   if (!c) return Array(n).fill(null);
-  const p = t - c.start, b = beatPos(t) - beatPos(c.start);
-  return Array.from({ length: n }, (_, i) => {
+  const A = rgbOf(c.col), B = rgbOf(c.col2), sp = c.speed ?? 1;
+  const p = (t - c.start) * sp, b = (beatPos(t) - beatPos(c.start)) * sp, fb = frac(b);
+  const env = ((c.bri ?? 100) / 100) * Math.min(1, c.fin ? (t - c.start) / c.fin : 1, c.fout ? (c.start + c.len - t) / c.fout : 1);
+  return Array.from({ length: n }, (_, j) => {
+    const i = c.rev ? n - 1 - j : j, x = n > 1 ? i / (n - 1) : 0;
+    let o;
     switch (c.fx) {
-      case 'Gradient': return hsl(c.hue + (i * 90) / n, 85, 58);
-      case 'Chase': return hsl(c.hue, 85, (i - Math.floor(b * 4)) % 4 === 0 ? 58 : 14);
-      case 'Pulse': return hsl(c.hue, 85, 14 + 44 * (1 - (((b % 1) + 1) % 1)));
-      case 'Rainbow': return hsl(c.hue + i * 24 + p * 90, 85, 58);
-      case 'Strobe': return Math.floor(b * 4) % 2 ? [0, 0, 0] : [255, 255, 255];
-      case 'Bass hit': return hsl(c.hue, 85, 8 + 52 * band(t, 0));
-      case 'Spectrum': { const k = Math.min(2, Math.floor((i * 3) / n)); return hsl(c.hue + k * 50, 85, 8 + 52 * band(t, k)); }
-      default: return hsl(c.hue, 85, 58);
+      case 'Gradient': o = mix(A, B, x); break;
+      case 'Chase': o = (i - Math.floor(b * 4)) % 4 === 0 ? A : lvl(B, 0.15); break;
+      case 'Pulse': o = lvl(A, 0.12 + 0.88 * (1 - fb)); break;
+      case 'Breathe': o = lvl(A, 0.04 + 0.96 * (0.5 - 0.5 * Math.cos((Math.PI * b) / 2))); break; // one breath per bar
+      case 'Wave': o = lvl(mix(A, B, x), 0.08 + 0.92 * (0.5 + 0.5 * Math.sin(2 * Math.PI * (2 * x - b / 2)))); break;
+      case 'Comet': { const d = frac(b / 4 - i / n) * n; o = d < 1 ? B : lvl(A, Math.max(0.03, 1 - d / (n / 4))); break; }
+      case 'Sparkle': o = rnd(i, Math.floor(p * 8)) > 0.85 ? B : lvl(A, 0.12); break;
+      case 'Fire': { const f = 0.5 * rnd(i, Math.floor(p * 10)) + 0.5 * rnd(i + 0.5, Math.floor(p * 4)); o = lvl(mix(A, B, f), 0.35 + 0.65 * f); break; }
+      case 'Alternate': o = (i + Math.floor(b)) % 2 ? A : B; break;
+      case 'Beat flash': o = lvl(Math.floor(b) % 2 ? B : A, Math.exp(-fb * 5)); break;
+      case 'Strobe': o = frac(b * 4) < 0.5 ? A : [0, 0, 0]; break;
+      case 'Rainbow': o = hsl(i * 24 + p * 90, 90, 55); break;
+      case 'Bass hit': o = lvl(A, band(t, 0)); break;
+      case 'Spectrum': { const k = Math.min(2, Math.floor(x * 2.999)); o = lvl(mix(A, B, k / 2), band(t, k)); break; }
+      default: o = A;
     }
+    return o.map((v) => Math.round(Math.max(0, Math.min(255, v * env))));
   });
 }
 const css = (c) => (typeof c === 'string' ? c : `rgb(${c[0]} ${c[1]} ${c[2]})`);
@@ -120,7 +148,7 @@ const V = {
     <button class="btn" data-act="pick" data-i="${S.cur}">Go live</button>
   </div>
   <div class="panes">
-    <aside class="lib"><h2 class="label">Effects</h2><div class="fxgrid">${EFFECTS.map((fx, i) => `<button class="fxtile" data-act="add" data-fx="${fx}"><span class="segs">${segs(Array.from({ length: 6 }, (_, k) => `hsl(${i * 60 + k * 18} 85% 60%)`))}</span>${fx}</button>`).join('')}</div><p class="muted small">Click an effect to drop it at the playhead.</p></aside>
+    <aside class="lib"><h2 class="label">Effects</h2><div class="fxgrid">${EFFECTS.map((fx) => `<button class="fxtile" data-act="add" data-fx="${fx}"><span class="segs">${segs(colorsAt({ segs: 8, clips: [{ fx, start: 0, len: 1e9, col: FX_COLORS[fx]?.[0] ?? '#2fd8b4', col2: FX_COLORS[fx]?.[1] ?? '#7c6cff' }] }, 0.7))}</span>${fx}</button>`).join('')}</div><p class="muted small">Click an effect to drop it at the playhead.</p></aside>
     <section class="stage" id="stage" aria-label="Preview">${stage()}</section>
     <aside class="insp">${c ? inspector(c) : '<h2 class="label">Clip</h2><p class="muted small">Select a clip on the timeline.</p>'}${trackPanel()}</aside>
   </div>
@@ -149,9 +177,13 @@ const V = {
 
 const inspector = (c) => `<h2 class="label">Clip</h2><div><strong style="font-size:16px">${c.fx}</strong><div class="muted small">${esc(sc().tracks[S.sel.ti].name)}</div></div>
 <label class="field">Effect<select data-in="fx">${EFFECTS.map((f) => `<option${f === c.fx ? ' selected' : ''}>${f}</option>`).join('')}</select></label>
-<label class="field">Colour<input type="range" min="0" max="359" value="${c.hue}" data-in="hue"></label><div class="swatch" id="swatch" style="background:hsl(${c.hue} 85% 58%)"></div>
+<div class="row"><label class="field" style="flex:1">Colour 1<input type="color" value="${c.col}" data-in="col"></label><label class="field" style="flex:1">Colour 2<input type="color" value="${c.col2}" data-in="col2"></label></div>
+<label class="field">Brightness<input type="range" min="0" max="100" value="${c.bri ?? 100}" data-in="cbri"></label>
+<div class="row"><label class="field" style="flex:1">Speed<select data-in="speed">${[0.25, 0.5, 1, 2, 4].map((x) => `<option value="${x}"${x === (c.speed ?? 1) ? ' selected' : ''}>${x}×</option>`).join('')}</select></label>
+<label class="row muted" style="flex:1;align-self:flex-end;min-height:36px"><input type="checkbox" data-in="rev" ${c.rev ? 'checked' : ''}>Reverse</label></div>
+<div class="row"><label class="field" style="flex:1">Fade in (s)<input type="number" min="0" step="0.1" value="${c.fin ?? 0}" data-in="fin"></label><label class="field" style="flex:1">Fade out (s)<input type="number" min="0" step="0.1" value="${c.fout ?? 0}" data-in="fout"></label></div>
 <div class="row"><label class="field" style="flex:1">Start (s)<input type="number" min="0" step="0.1" value="${+c.start.toFixed(2)}" data-in="start"></label><label class="field" style="flex:1">Length (s)<input type="number" min="0.1" step="0.1" value="${+c.len.toFixed(2)}" data-in="clen"></label></div>
-<button class="btn" data-act="del">Delete clip</button>`;
+<div class="row"><button class="btn" style="flex:1" data-act="dup">Duplicate</button><button class="btn" style="flex:1" data-act="del">Delete</button></div>`;
 
 const trackPanel = () => {
   const tr = sc().tracks[S.ti]; if (!tr) return '';
@@ -170,7 +202,7 @@ function timeline() {
   const ticks = Array.from({ length: Math.ceil(s.len / step) }, (_, i) => `<span style="left:${pct(i * step)}">${step < 1 ? fmt(i * step) : fmt(i * step).slice(0, -2)}</span>`).join('');
   return `<div class="tlbody" style="width:calc(192px + (100% - 192px) * ${S.zoom})"><div class="ruler" data-seek>${ticks}</div>
 ${S.an ? `<div class="track audio"><div class="thead"><i style="background:var(--accent2)"></i><span class="tname">${esc(s.audio.name)}</span></div><div class="lane" data-seek><canvas id="wave" aria-label="Music waveform with beat lines"></canvas></div></div>` : ''}
-${s.tracks.map((tr, ti) => `<div class="track"><div class="thead${ti === S.ti ? ' on' : ''}"><button class="tdot" data-act="track" data-ti="${ti}" aria-label="Track settings" title="Track settings" style="background:hsl(${160 + ti * 70} 70% 60%)"></button><input class="tname" aria-label="Track name" value="${esc(tr.name)}" data-in="tname" data-ti="${ti}"></div><div class="lane" data-seek>${tr.clips.map((c, ci) => `<button class="clip${S.sel?.ti === ti && S.sel?.ci === ci ? ' sel' : ''}" data-act="sel" data-ti="${ti}" data-ci="${ci}" style="left:${pct(c.start)};width:${pct(c.len)};background:hsl(${c.hue} 70% 62%)">${c.fx}</button>`).join('')}</div></div>`).join('')}
+${s.tracks.map((tr, ti) => `<div class="track"><div class="thead${ti === S.ti ? ' on' : ''}"><button class="tdot" data-act="track" data-ti="${ti}" aria-label="Track settings" title="Track settings" style="background:hsl(${160 + ti * 70} 70% 60%)"></button><input class="tname" aria-label="Track name" value="${esc(tr.name)}" data-in="tname" data-ti="${ti}"></div><div class="lane" data-seek>${tr.clips.map((c, ci) => `<button class="clip${S.sel?.ti === ti && S.sel?.ci === ci ? ' sel' : ''}" data-act="sel" data-ti="${ti}" data-ci="${ci}" style="left:${pct(c.start)};width:${pct(c.len)};background:${c.col};color:${ink(c.col)}">${c.fx}</button>`).join('')}</div></div>`).join('')}
 <div class="phwrap"><div id="playhead" style="left:${pct(S.t)}"></div></div></div>`;
 }
 
@@ -344,8 +376,16 @@ const A = {
   add: (d) => {
     const s = sc(); if (!s.tracks.length) return;
     const ti = S.sel?.ti ?? 0, len = Math.min(4 * beat(), s.len);
-    s.tracks[ti].clips.push({ fx: d.fx, start: Math.min(snap(S.t), s.len - len), len, hue: Math.floor(Math.random() * 360) });
+    const h = Math.random() * 360, [col, col2] = FX_COLORS[d.fx] ?? [hex(hsl(h, 85, 58)), hex(hsl(h + 120, 85, 58))];
+    s.tracks[ti].clips.push({ fx: d.fx, start: Math.min(snap(S.t), s.len - len), len, col, col2 });
     S.sel = { ti, ci: s.tracks[ti].clips.length - 1 };
+    save(); render();
+  },
+  dup: () => {
+    const c = clip(); if (!c) return;
+    const clips = sc().tracks[S.sel.ti].clips;
+    clips.push({ ...c, start: Math.min(c.start + c.len, sc().len - c.len) });
+    S.sel = { ti: S.sel.ti, ci: clips.length - 1 };
     save(); render();
   },
   addTrack: () => { sc().tracks.push({ name: `Track ${sc().tracks.length + 1}`, segs: 15, clips: [] }); save(); render(); },
@@ -384,7 +424,13 @@ document.addEventListener('input', (e) => {
     case 'fx': c.fx = v; save(); render(); return;
     case 'len': if (v < 5) return; s.len = v; break;
     case 'bpm': if (v < 30 || v > 300) return; s.bpm = v; break;
-    case 'hue': c.hue = v; $('#swatch').style.background = `hsl(${v} 85% 58%)`; break;
+    case 'col': c.col = v; break;
+    case 'col2': c.col2 = v; break;
+    case 'cbri': c.bri = v; break;
+    case 'speed': c.speed = +v; break;
+    case 'rev': c.rev = v; break;
+    case 'fin': c.fin = Math.max(0, Math.min(v, c.len)); break;
+    case 'fout': c.fout = Math.max(0, Math.min(v, c.len)); break;
     case 'start': c.start = Math.max(0, Math.min(v, s.len - c.len)); break;
     case 'clen': c.len = Math.max(0.1, Math.min(v, s.len - c.start)); break;
   }
@@ -423,7 +469,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 invoke('load_scenes')
-  .then((j) => { const v = JSON.parse(j); if (Array.isArray(v) && v.length) S.scenes = v; })
+  .then((j) => { const v = JSON.parse(j); if (Array.isArray(v) && v.length) S.scenes = migrate(v); })
   .catch((err) => { if (window.__TAURI__) { S.noSave = true; console.error(err); } }) // never overwrite a file we failed to read
   .finally(() => { render(); scan(); ensureAudio(); });
 
