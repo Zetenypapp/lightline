@@ -2,6 +2,7 @@
 
 mod analysis;
 mod app;
+mod auto;
 mod audio;
 mod fx;
 mod govee;

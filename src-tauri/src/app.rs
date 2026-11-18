@@ -673,6 +673,15 @@ impl App {
             let pulse = 1.0 - self.cx().beat_pos(self.t).rem_euclid(1.0) as f32;
             ui.label(RichText::new("●").color(ACCENT.gamma_multiply(0.25 + 0.75 * pulse)));
             ui.label(RichText::new(format!("{} BPM · {} beats", an.bpm, an.beats.len())).color(ACCENT));
+            let an = an.clone();
+            if ui.button("Auto show").on_hover_text("Make a new scene from this song: calm parts calm, drops busy and colourful").clicked() {
+                let mut s = self.sc().clone();
+                s.name = format!("{} (auto)", s.name);
+                crate::auto::fill(&an, s.len, &mut s.tracks);
+                self.scenes.push(s);
+                self.dirty = true;
+                self.open(ctx, self.scenes.len() - 1, Page::Editor);
+            }
         }
         ui.add_space(12.0);
         if icon_button(ui, Icon::Prev, 34.0, false).on_hover_text("Back to start").clicked() {
