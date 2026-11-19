@@ -30,7 +30,9 @@ const ROW_H: f32 = 46.0;
 
 /// Most colours per frame a light accepts (more and it rejects the frame and goes dark), measured on the
 /// user's lights. Other models start at their Govee-app segment count.
-const SEG_MEASURED: [(&str, usize); 3] = [("H61F6", 84), ("H619C", 40), ("H6609", 10)];
+const SEG_MEASURED: [(&str, usize); 4] = [("H61F6", 84), ("H619C", 40), ("H6609", 10), ("H60A1", 1)];
+/// Lights without real-time mode: driven with one colour by the plain colour command (tested: H60A1 ceiling light).
+const NO_STREAM: [&str; 1] = ["H60A1"];
 /// Lights seen keeping up with 120 frames/s (H61F6 can't; unknown models get 30).
 const FAST_MEASURED: [&str; 1] = ["H619C"];
 
@@ -416,7 +418,7 @@ impl App {
             let Some(d) = tr.dev.as_ref().and_then(|id| self.devices.iter().find(|d| &d.id == id)) else { continue };
             match outputs.iter_mut().find(|o| o.ip == d.ip) {
                 Some(o) => o.tracks.push(tr.clone()),
-                None => outputs.push(Output { ip: d.ip.clone(), max: self.light_segs(d), lead: -self.settings.loff_ms.get(&d.id).copied().unwrap_or(0.0) / 1000.0, fast: FAST_MEASURED.contains(&d.sku.as_str()), smooth: self.light_smooth(&d.id), tracks: vec![tr.clone()] }),
+                None => outputs.push(Output { ip: d.ip.clone(), max: self.light_segs(d), lead: -self.settings.loff_ms.get(&d.id).copied().unwrap_or(0.0) / 1000.0, fast: FAST_MEASURED.contains(&d.sku.as_str()), smooth: self.light_smooth(&d.id), simple: NO_STREAM.contains(&d.sku.as_str()), tracks: vec![tr.clone()] }),
             }
         }
         for o in &mut outputs {

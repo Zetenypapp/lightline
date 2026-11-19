@@ -20,6 +20,7 @@ pub struct Output {
     pub lead: f64, // seconds this light shows frames late; it gets them that much early
     pub fast: bool, // measured to keep up with 120 frames/s; others get every 5th frame
     pub smooth: f64, // 0..100, this light's fade
+    pub simple: bool, // no real-time mode (e.g. ceiling lights): one colour by the plain colour command, 10/s
     pub tracks: Vec<Track>,
 }
 
@@ -41,6 +42,7 @@ struct State {
     ticks: u64,
     sm: Smoother,
     peak: HashMap<String, Vec<u8>>, // slow lights: brightest colour per segment since their last frame
+    simple: HashMap<String, [u8; 3]>, // simple lights: last colour sent
 }
 
 pub struct Lights {
@@ -49,7 +51,7 @@ pub struct Lights {
 
 impl Lights {
     pub fn start(player: Arc<Player>) -> Arc<Self> {
-        let st = State { show: Show::default(), live: vec![], play: None, ticks: 0, sm: Smoother::default(), peak: HashMap::new() };
+        let st = State { show: Show::default(), live: vec![], play: None, ticks: 0, sm: Smoother::default(), peak: HashMap::new(), simple: HashMap::new() };
         let me = Arc::new(Lights { st: Mutex::new(st) });
         let l = me.clone();
         std::thread::spawn(move || {
@@ -69,6 +71,10 @@ impl Lights {
         me
     }
 
+    fn is_simple(&self, ip: &str) -> bool {
+        self.st.lock().unwrap().simple.contains_key(ip)
+    }
+
     pub fn set_show(&self, show: Show) {
         self.st.lock().unwrap().show = show;
     }
@@ -83,7 +89,8 @@ impl Lights {
         let ips = {
             let mut s = self.st.lock().unwrap();
             s.play = None;
-            std::mem::take(&mut s.live).into_iter().map(|(ip, _)| ip).collect::<Vec<_>>()
+            let simple = std::mem::take(&mut s.simple);
+            std::mem::take(&mut s.live).into_iter().map(|(ip, _)| ip).filter(|ip| !simple.contains_key(ip)).collect::<Vec<_>>()
         };
         set_mode(&ips, false);
     }
@@ -101,7 +108,12 @@ impl Lights {
             at + since.elapsed().as_secs_f64()
         };
         // Real-time mode for exactly the lights in the show (it can change while playing).
-        let want: Vec<String> = s.show.outputs.iter().map(|o| o.ip.clone()).collect();
+        let want: Vec<String> = s.show.outputs.iter().filter(|o| !o.simple).map(|o| o.ip.clone()).collect();
+        // Simple lights: switch them on once when they join.
+        let new_simple: Vec<String> = s.show.outputs.iter().filter(|o| o.simple && !s.simple.contains_key(&o.ip)).map(|o| o.ip.clone()).collect();
+        for ip in &new_simple {
+            s.simple.insert(ip.clone(), [1, 2, 3]); // nothing sent yet
+        }
         let on: Vec<String> = want.iter().filter(|ip| !s.live.iter().any(|(x, _)| x == *ip)).cloned().collect();
         let off: Vec<String> = s.live.iter().map(|(ip, _)| ip).filter(|ip| !want.contains(ip)).cloned().collect();
         let now = Instant::now();
@@ -116,7 +128,8 @@ impl Lights {
             vec![]
         };
         let s_ticks = s.ticks;
-        let State { show, sm, peak, .. } = &mut *s;
+        let State { show, sm, peak, simple, .. } = &mut *s;
+        let tenth = s_ticks % 12 == 0; // simple lights: 10 colours a second at most
         let cx = Ctx { an: show.an.as_deref(), bpm: show.bpm };
         let k = if show.black { 0.0 } else { show.bri as f32 };
         let ms = epoch.elapsed().as_secs_f64() * 1000.0;
@@ -128,7 +141,7 @@ impl Lights {
                 let cols = sm.step(&o.ip, &fx::light_colors(&o.tracks, t - show.off + o.lead, &cx), ms, o.smooth);
                 let rgb: Vec<u8> = if show.flash { vec![255; cols.len() * 3] } else { cols.iter().flat_map(|c| c.unwrap_or([0.0; 3]).map(|v| (v * k).round() as u8)).collect() };
                 let rgb = stretch(&rgb, o.max);
-                if o.fast {
+                if o.fast && !o.simple {
                     return Some((o.ip.clone(), rgb));
                 }
                 // A slow light gets every 5th frame: keep each segment's brightest colour in between,
@@ -139,7 +152,19 @@ impl Lights {
                 } else {
                     keep_brightest(p, &rgb);
                 }
-                even.then(|| (o.ip.clone(), std::mem::take(p)))
+                if !o.simple {
+                    return even.then(|| (o.ip.clone(), std::mem::take(p)));
+                }
+                // One colour for the whole light: the average, sent only when it changes.
+                let px = std::mem::take(p);
+                if !tenth || px.is_empty() {
+                    if !tenth { *p = px; }
+                    return None;
+                }
+                let n = (px.len() / 3).max(1) as u32;
+                let avg = [0, 1, 2].map(|k| (px.chunks(3).map(|c| c[k] as u32).sum::<u32>() / n) as u8);
+                let last = simple.insert(o.ip.clone(), avg);
+                (last.map_or(true, |l| l.iter().zip(avg).any(|(a, b)| a.abs_diff(b) > 4))).then(|| (o.ip.clone(), avg.to_vec()))
             })
             .collect();
         drop(s);
@@ -152,8 +177,12 @@ impl Lights {
         for ip in &burst {
             let _ = govee::stream_mode(ip, true);
         }
+        if !new_simple.is_empty() {
+            std::thread::spawn(move || new_simple.iter().for_each(|ip| { let _ = govee::turn(ip, true); }));
+        }
         for (ip, rgb) in frames {
-            if let Err(e) = govee::frame(&ip, &rgb) {
+            let sent = if rgb.len() == 3 && self.is_simple(&ip) { govee::colour(&ip, [rgb[0], rgb[1], rgb[2]]) } else { govee::frame(&ip, &rgb) };
+            if let Err(e) = sent {
                 eprintln!("[lights] {ip}: {e}");
             }
         }

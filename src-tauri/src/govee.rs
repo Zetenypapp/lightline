@@ -106,6 +106,25 @@ pub fn b64(data: &[u8]) -> String {
 static BLINKING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// Starts or stops blinking a light so you can tell which one it is. Stopping turns it back on.
+/// One colour for the whole light (works on every LAN light, also ones without real-time mode).
+pub fn colour(ip: &str, c: [u8; 3]) -> Result<(), String> {
+    send(ip, json!({"msg": {"cmd": "colorwc", "data": {"color": {"r": c[0], "g": c[1], "b": c[2]}, "colorTemInKelvin": 0}}}))
+}
+
+/// Plain colour command check: red, green, blue for 3 s each. LIGHT=ip cargo test colour_check -- --ignored
+#[test]
+#[ignore]
+fn colour_check() {
+    let ip = std::env::var("LIGHT").expect("LIGHT=ip of the light");
+    let _ = stream_mode(&ip, false);
+    let _ = turn(&ip, true);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    for c in [[255, 0, 0], [0, 255, 0], [0, 0, 255]] {
+        colour(&ip, c).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+
 pub fn identify(ip: &str, on: bool) -> Result<(), String> {
     let mut set = BLINKING.lock().unwrap();
     let was = set.iter().any(|x| x == ip);
