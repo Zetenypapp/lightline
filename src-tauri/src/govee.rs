@@ -125,6 +125,53 @@ fn colour_check() {
     }
 }
 
+/// White at a colour temperature, for putting a light back how it was.
+pub fn white(ip: &str, kelvin: u64) -> Result<(), String> {
+    send(ip, json!({"msg": {"cmd": "colorwc", "data": {"color": {"r": 0, "g": 0, "b": 0}, "colorTemInKelvin": kelvin}}}))
+}
+
+/// Each light's current state (on/off, brightness, colour, white temperature), by IP.
+/// Lights that don't answer within 0.6 s are left out.
+pub fn status(ips: &[String]) -> std::collections::HashMap<String, Value> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(s) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 4002)) else { return out };
+    let _ = s.set_read_timeout(Some(Duration::from_millis(100)));
+    let ask = json!({"msg": {"cmd": "devStatus", "data": {}}}).to_string();
+    for ip in ips {
+        if let Ok(a) = ip.parse::<Ipv4Addr>() {
+            let _ = s.send_to(ask.as_bytes(), (a, 4003));
+        }
+    }
+    let mut buf = [0u8; 2048];
+    let end = Instant::now() + Duration::from_millis(600);
+    while Instant::now() < end && out.len() < ips.len() {
+        let Ok((n, from)) = s.recv_from(&mut buf) else { continue };
+        let Ok(v) = serde_json::from_slice::<Value>(&buf[..n]) else { continue };
+        if v["msg"]["cmd"] == "devStatus" {
+            out.insert(from.ip().to_string(), v["msg"]["data"].clone());
+        }
+    }
+    out
+}
+
+/// Puts a light back the way `status` found it: off if it was off; for lights we coloured with the
+/// plain colour command (`recolour`), also their colour or white.
+pub fn restore(ip: &str, st: &Value, recolour: bool) {
+    if st["onOff"].as_u64() == Some(0) {
+        let _ = turn(ip, false);
+        return;
+    }
+    if recolour {
+        let k = st["colorTemInKelvin"].as_u64().unwrap_or(0);
+        let _ = if k > 0 {
+            white(ip, k)
+        } else {
+            let c = |n: &str| st["color"][n].as_u64().unwrap_or(255).min(255) as u8;
+            colour(ip, [c("r"), c("g"), c("b")])
+        };
+    }
+}
+
 pub fn identify(ip: &str, on: bool) -> Result<(), String> {
     let mut set = BLINKING.lock().unwrap();
     let was = set.iter().any(|x| x == ip);

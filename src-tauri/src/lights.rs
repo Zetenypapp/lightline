@@ -48,12 +48,15 @@ struct State {
 
 pub struct Lights {
     st: Mutex<State>,
+    /// How each light was before we took it over (None = it didn't say), to put it back afterwards.
+    /// A simple light gets no colours until its entry exists.
+    saved: Arc<Mutex<HashMap<String, Option<serde_json::Value>>>>,
 }
 
 impl Lights {
     pub fn start(player: Arc<Player>) -> Arc<Self> {
         let st = State { show: Show::default(), live: vec![], play: None, ticks: 0, sm: Smoother::default(), peak: HashMap::new(), simple: HashMap::new() };
-        let me = Arc::new(Lights { st: Mutex::new(st) });
+        let me = Arc::new(Lights { st: Mutex::new(st), saved: Arc::new(Mutex::new(HashMap::new())) });
         let l = me.clone();
         std::thread::spawn(move || {
             let (period, epoch) = (Duration::from_secs_f64(1.0 / SEND_HZ), Instant::now());
@@ -91,9 +94,16 @@ impl Lights {
             let mut s = self.st.lock().unwrap();
             s.play = None;
             let simple = std::mem::take(&mut s.simple);
-            std::mem::take(&mut s.live).into_iter().map(|(ip, _)| ip).filter(|ip| !simple.contains_key(ip)).collect::<Vec<_>>()
+            let stream = std::mem::take(&mut s.live).into_iter().map(|(ip, _)| ip).filter(|ip| !simple.contains_key(ip)).collect::<Vec<_>>();
+            (stream, simple)
         };
+        let (ips, simple) = ips;
         set_mode(&ips, false);
+        for (ip, st) in std::mem::take(&mut *self.saved.lock().unwrap()) {
+            if let Some(st) = st {
+                govee::restore(&ip, &st, simple.contains_key(&ip));
+            }
+        }
     }
 
     fn tick(&self, player: &Player, epoch: Instant) {
@@ -169,20 +179,43 @@ impl Lights {
             })
             .collect();
         drop(s);
-        if !on.is_empty() || !off.is_empty() {
+        if !on.is_empty() || !off.is_empty() || !new_simple.is_empty() {
+            let saved = self.saved.clone();
             std::thread::spawn(move || {
+                // Remember how the joining lights are, before switching them on.
+                let joining: Vec<String> = on.iter().chain(&new_simple).cloned().collect();
+                if !joining.is_empty() {
+                    let mut st = govee::status(&joining);
+                    let mut sv = saved.lock().unwrap();
+                    for ip in joining {
+                        sv.entry(ip.clone()).or_insert(st.remove(&ip));
+                    }
+                }
                 set_mode(&on, true);
+                for ip in &new_simple {
+                    let _ = govee::turn(ip, true);
+                }
                 set_mode(&off, false);
+                for ip in &off {
+                    if let Some(Some(st)) = saved.lock().unwrap().remove(ip) {
+                        govee::restore(ip, &st, false);
+                    }
+                }
             });
         }
         for ip in &burst {
             let _ = govee::stream_mode(ip, true);
         }
-        if !new_simple.is_empty() {
-            std::thread::spawn(move || new_simple.iter().for_each(|ip| { let _ = govee::turn(ip, true); }));
-        }
         for (ip, rgb) in frames {
-            let sent = if rgb.len() == 3 && self.is_simple(&ip) { govee::colour(&ip, [rgb[0], rgb[1], rgb[2]]) } else { govee::frame(&ip, &rgb) };
+            let sent = if rgb.len() == 3 && self.is_simple(&ip) {
+                if !self.saved.lock().unwrap().contains_key(&ip) {
+                    self.st.lock().unwrap().simple.insert(ip.clone(), [1, 2, 3]); // resend once its state is saved
+                    continue;
+                }
+                govee::colour(&ip, [rgb[0], rgb[1], rgb[2]])
+            } else {
+                govee::frame(&ip, &rgb)
+            };
             if let Err(e) = sent {
                 eprintln!("[lights] {ip}: {e}");
             }
