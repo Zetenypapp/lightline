@@ -2120,6 +2120,7 @@ impl App {
         if let Some(x) = self.scroll_to.take() {
             sa = sa.horizontal_scroll_offset(x.max(0.0));
         }
+        let mut enter = None; // opened after drawing: the rows change once a compound clip is open
         let out = sa.show_viewport(ui, |ui, vp| {
             let (rect, _) = ui.allocate_exact_size(Vec2::new(LABEL_W + lane_w + 12.0, total_h), Sense::hover());
             let o = rect.min;
@@ -2226,7 +2227,7 @@ impl App {
             for ti in 0..n_tracks {
                 let locked = self.sc().tracks.get(self.real_track(ti)).is_some_and(|t| t.locked);
                 for ci in 0..self.lane(ti).len() {
-                    let c = self.lane(ti)[ci].clone();
+                    let Some(c) = self.lane(ti).get(ci).cloned() else { continue };
                     let row = match &self.drag { Some(d) if d.ti == ti && d.ci == ci => d.target, _ => ti };
                     let r = Rect::from_min_max(
                         Pos2::new(x_of(c.start), rows_y + row as f32 * ROW_H + 4.0),
@@ -2275,7 +2276,7 @@ impl App {
                         }
                     }
                     if resp.double_clicked() && c.fx == COMPOUND && self.inside.is_none() {
-                        self.enter_compound(ti, ci);
+                        enter = Some((ti, ci));
                         self.multi.clear();
                     } else if resp.clicked() {
                         match self.sel {
@@ -2368,6 +2369,9 @@ impl App {
             (lane_x, lane_w)
         });
 
+        if let Some((ti, ci)) = enter {
+            self.enter_compound(ti, ci);
+        }
         // Ctrl + scroll zooms around the mouse; while playing, keep the playhead in view.
         let (inner, offset) = (out.inner_rect, out.state.clamped_offset().x);
         let zd = ui.input(|i| i.zoom_delta());
