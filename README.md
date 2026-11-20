@@ -17,7 +17,7 @@ Native Windows app written in Rust: a single ~7 MB `.exe`, no browser engine, no
 - **Layers:** several tracks can drive one light; the higher track wins, and its dark parts let the tracks below show through.
 - **Build show:** generates a full layered show for a song. You pick the colour set (20 of them), the speed (Chill/Normal/Wild), what it focuses on (beat, vocals or melody) and whether it strobes. Every build is a new variation.
 - **React to PC audio:** the lights follow whatever is playing on the PC (Spotify, YouTube, games) in real time, no song import needed.
-- **Follow your media player:** works with [Riff](https://github.com/rootscripts/riff), Spotify, browsers, anything that shows in Windows' media controls. When a song plays that you made a scene for, Lightline plays that scene in sync with the player; any other song gets the live look.
+- **Follow your media player:** works with Spotify, browsers and other players that show in Windows' media controls, and with [Riff](https://github.com/rootscripts/riff) through a small plugin (React tab → Install Riff plugin, then turn it on in Riff's plugin settings). When a song plays that you made a scene for, Lightline plays that scene in sync with the player; any other song gets the live look.
 - **Chain lights:** one track can run across all your lights as one long strip.
 - **Lights go back to how they were** when a show stops, and Lightline tells you when a new version is out.
 - **Live page:** play scenes full screen with a playlist (play next, shuffle), hold **F** to flash every light white, **B** for blackout.

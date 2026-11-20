@@ -1553,7 +1553,7 @@ impl App {
                 ui.label(RichText::new("Media player").color(MUTED).strong());
                 let on = self.follow.is_some();
                 let b = ui.add_sized([ui.available_width(), 40.0], egui::Button::new(if on { "Stop following" } else { "Follow media player" }).selected(on));
-                if b.on_hover_text("Riff, Spotify, a browser...: songs you made a scene for play that scene in sync, everything else gets the live look below").clicked() {
+                if b.on_hover_text("Spotify, a browser...: songs you made a scene for play that scene in sync, everything else gets the live look below").clicked() {
                     if on { self.stop_follow() } else { self.start_follow(ui.ctx()) }
                 }
                 if let Some(f) = &self.follow {
@@ -1564,6 +1564,18 @@ impl App {
                         (None, _) => "Nothing playing (or the player doesn't show in Windows' media controls)".into(),
                     };
                     ui.label(RichText::new(text).color(ACCENT).small());
+                }
+                if let Some(dir) = crate::media::riff_plugins_dir() {
+                    let path = dir.join("lightline.js");
+                    let installed = std::fs::read_to_string(&path).is_ok_and(|s| s == crate::media::RIFF_PLUGIN);
+                    if installed {
+                        ui.label(RichText::new("Riff plugin installed. Turn \"Lightline\" on in Riff's plugin settings.").color(MUTED).small());
+                    } else if ui.button("Install Riff plugin").on_hover_text("Riff tells Windows the song but not where it is; this plugin tells Lightline directly").clicked() {
+                        self.status = match std::fs::write(&path, crate::media::RIFF_PLUGIN) {
+                            Ok(()) => String::new(),
+                            Err(e) => format!("Couldn't install the Riff plugin: {e}"),
+                        };
+                    }
                 }
                 ui.add_space(10.0);
                 ui.label(RichText::new("PC audio").color(MUTED).strong());
