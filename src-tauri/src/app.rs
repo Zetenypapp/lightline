@@ -1616,7 +1616,16 @@ impl App {
         });
         egui::CentralPanel::default().frame(Frame::new().fill(BG).inner_margin(Margin { left: 24, right: 8, top: 12, bottom: 16 })).show(ui, |ui| {
             let on = self.live_in.is_some();
-            ui.label(RichText::new(if on { "● Listening" } else { "● Off" }).color(if on { ACCENT } else { MUTED }).strong());
+            let head = match &self.follow {
+                Some(f) => match (&f.np, f.scene) {
+                    (Some(n), Some(i)) if n.playing && f.synced.is_some() => format!("● Following {} · scene \"{}\"", n.app, self.scenes[i].name),
+                    (Some(n), _) if n.playing => format!("● Following {} · reacting live", n.app),
+                    _ => "● Following · waiting for a song".into(),
+                },
+                None if on => "● Listening".into(),
+                None => "● Off".into(),
+            };
+            ui.label(RichText::new(head).color(if on || self.follow.is_some() { ACCENT } else { MUTED }).strong());
             ui.label(RichText::new("React to PC audio").size(40.0).strong());
             ui.label(RichText::new("The lights follow whatever this PC is playing: Spotify, YouTube, games. No scene needed.").color(MUTED));
             ui.add_space(14.0);
