@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 pub type Rgb = [f32; 3];
 
-pub const EFFECTS: [&str; 55] = [
+pub const EFFECTS: [&str; 60] = [
     "Solid", "Gradient", "Chase", "Pulse", "Breathe", "Wave", "Comet", "Sparkle", "Fire", "Alternate", "Beat flash", "Strobe", "Rainbow",
     "Riser", "Converge", "Scanner", "Stack", "Heartbeat", "Colour jump",
     "Plasma", "Meteor shower", "Ping-pong", "Colour wipe", "Twinkle", "Police",
@@ -15,13 +15,15 @@ pub const EFFECTS: [&str; 55] = [
     "Ripple", "Hi-hats", "Glitch", "Snare", "Bass VU", "Drop flash", "Treble",
     "Fireworks", "Lightning", "EQ bars", "Bouncing ball", "Sparks", "Energy",
     "Vocal colour", "Drop countdown", "Bass wobble", "Clap",
+    "Kick chase", "Pitch trail", "Split bands", "Tug of war", "Heat",
 ];
 
 /// Effects that follow the song itself (the rest are patterns timed to the beat).
-pub const REACTIVE: [&str; 24] = [
+pub const REACTIVE: [&str; 29] = [
     "Bass hit", "Spectrum", "Meter", "Visualizer", "Kick", "Voice", "Lead", "Ripple", "Hi-hats", "Glitch", "Snare", "Bass VU", "Drop flash", "Treble",
     "Fireworks", "Lightning", "EQ bars", "Bouncing ball", "Sparks", "Energy",
     "Vocal colour", "Drop countdown", "Bass wobble", "Clap",
+    "Kick chase", "Pitch trail", "Split bands", "Tug of war", "Heat",
 ];
 
 /// Starting colours for effects that need specific ones.
@@ -43,6 +45,8 @@ pub fn default_colors(fx: &str) -> Option<([u8; 3], [u8; 3])> {
         "Aurora" => ([0x10, 0xff, 0x90], [0x80, 0x30, 0xff]),
         "Matrix rain" => ([0x00, 0xff, 0x40], [0xd0, 0xff, 0xd0]),
         "Candle" => ([0xff, 0x50, 0x00], [0xff, 0xc0, 0x50]),
+        "Heat" => ([0x40, 0x00, 0xa0], [0xff, 0x30, 0x00]),
+        "Tug of war" => ([0xff, 0x20, 0x40], [0x20, 0x80, 0xff]),
         _ => return None,
     })
 }
@@ -142,7 +146,7 @@ impl Ctx<'_> {
         let r: Vec<f32> = (g0..=f).map(rise).collect();
         (1..r.len())
             .filter(|&k| r[k] > 0.12 && r[k] >= r[k - 1] && r[k] > r.get(k + 1).copied().unwrap_or(f32::MIN))
-            .map(|k| ((f - (g0 + k)) as f32 / a.fps as f32, (r[k] * 4.0).min(1.0), g0 + k))
+            .map(|k| ((f - (g0 + k)) as f32 / a.fps as f32, (r[k] * 4.0).min(1.0), g0 + k + (a.lag * a.fps).round() as usize))
             .collect()
     }
 
@@ -289,10 +293,10 @@ fn pattern(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
         "Bass VU" => cx.band(t, 0),
         "Lightning" => cx.snare(t).max(cx.vis(t).flash),
         // Overall loudness over the last 0.4 s: smooth, no flicker.
-        "Energy" => (0..8).map(|k| (0..3).map(|j| cx.band(t - k as f64 * 0.05, j)).sum::<f32>() / 3.0).sum::<f32>() / 8.0,
+        "Energy" | "Heat" => (0..8).map(|k| (0..3).map(|j| cx.band(t - k as f64 * 0.05, j)).sum::<f32>() / 3.0).sum::<f32>() / 8.0,
         _ => 0.0,
     };
-    let rings = if matches!(c.fx.as_str(), "Ripple" | "Fireworks" | "Bouncing ball") { cx.kick_onsets(t) } else { vec![] };
+    let rings = if matches!(c.fx.as_str(), "Ripple" | "Fireworks" | "Bouncing ball" | "Kick chase") { cx.kick_onsets(t) } else { vec![] };
     // Without a song: a kick every beat, so the effect still shows something.
     let rings = if cx.an.is_none() && rings.is_empty() && c.fx != "Ripple" { let bp = cx.beat_pos(t); vec![((frac(bp) * cx.beat()) as f32, 1.0, bp.floor() as usize)] } else { rings };
     let lead = matches!(c.fx.as_str(), "Lead" | "Drop flash" | "Sparks" | "Vocal colour").then(|| cx.vis(t));
@@ -304,6 +308,14 @@ fn pattern(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
         let prev = ch.iter().copied().filter(|&s| s <= t).last().unwrap_or(f64::MIN);
         ((1.0 - (next - t) / (4.0 * cx.beat())).clamp(0.0, 1.0) as f32, (-(t - prev) * 3.0).exp() as f32)
     });
+    // Pitch trail: where the lead note was over the last 0.3 s (pitch 0..1, loudness 0..1), newest first.
+    let trail: Vec<(f32, f32)> = if c.fx != "Pitch trail" { vec![] } else {
+        (0..10).filter_map(|k| {
+            let (a, f) = cx.at(t - k as f64 * 0.03)?;
+            let l = a.lead.get(f * 2..f * 2 + 2)?;
+            Some((l[0] as f32 / 255.0, (l[1] as f32 / 255.0).powf(0.35) * (1.0 - k as f32 / 10.0)))
+        }).collect()
+    };
     let bars = (c.fx == "EQ bars").then(|| (0..8).map(|k| cx.spec(t, (k as f32 + 0.5) / 8.0).powf(1.3)).collect::<Vec<_>>());
     let q = ((t - c.start) / c.len.max(1e-6)).clamp(0.0, 1.0) as f32; // how far into the clip
     let edge = |x: f32| x.min(1.0 - x) * 2.0; // 0 at both ends, 1 in the middle
@@ -420,12 +432,12 @@ fn pattern(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
                 // 8 blocks, one per stretch of the spectrum, lit as hard as it plays, with dark gaps.
                 "EQ bars" => {
                     let k = ((x * 8.0) as usize).min(7);
-                    let gap = n >= 16 && (i + 1) % (n / 8).max(1) == 0;
+                    let gap = n >= 16 && i + 1 < n && (((i + 1) as f32 / (n - 1) as f32 * 8.0) as usize).min(7) != k;
                     if gap { [0.0; 3] } else { lvl(pal_at(&c.pal, k as f32 / 7.0), bars.as_ref().unwrap()[k]) }
                 }
                 // Thrown up by the latest kick, falls back under gravity.
                 "Bouncing ball" => {
-                    let h = rings.iter().map(|&(age, s, _)| s.max(0.5) * 4.0 * (age / 0.9) * (1.0 - age / 0.9)).next_back().unwrap_or(0.0);
+                    let h = rings.iter().map(|&(age, s, _)| s.max(0.5) * 4.0 * (age / 0.9) * (1.0 - age / 0.9)).next_back().unwrap_or(0.0).max(0.0);
                     let d = (i as f32 - h * (n - 1) as f32).abs();
                     screen(Some(lvl(a, (1.0 - d / 1.5).max(0.0))), Some(lvl(b2, (1.0 - d / 4.0).max(0.0) * 0.3))).unwrap()
                 }
@@ -483,6 +495,32 @@ fn pattern(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
                 "Theatre chase" => {
                     let k = (i as i64 + (b * 1.5).floor() as i64).div_euclid(3);
                     if k.rem_euclid(2) == 0 { if k.rem_euclid(4) == 0 { a } else { b2 } } else { [0.0; 3] }
+                }
+                // Each kick fires a pulse from one end to the other.
+                "Kick chase" => {
+                    let v = rings.iter().map(|&(age, s, _)| s * (1.0 - age / 0.9) * (-((x - age / 0.9) / 0.05).powi(2)).exp()).fold(0.0, f32::max);
+                    lvl(mix(a, b2, x), v.min(1.0))
+                }
+                "Pitch trail" => trail.iter().enumerate().fold([0.0; 3], |o, (k, &(at, l))| {
+                    let v = (1.0 - (i as f32 - at * (n - 1) as f32).abs() / 1.5).max(0.0) * l;
+                    screen(Some(o), Some(lvl(mix(a, b2, k as f32 / 10.0), v))).unwrap()
+                }),
+                // Bass on the first third, mids in the middle, treble on the last.
+                "Split bands" => {
+                    let z = ((x * 3.0) as usize).min(2);
+                    lvl(mix(a, b2, z as f32 / 2.0), cx.band(t, z).powf(1.3))
+                }
+                // Bass pushes in from the start, treble from the end.
+                "Tug of war" => {
+                    let (lo, hi) = (cx.band(t, 0), cx.band(t, 2));
+                    let l = if n == 1 || x <= lo * 0.6 { lvl(a, lo) } else { [0.0; 3] };
+                    let r = if n == 1 || 1.0 - x <= hi * 0.6 { lvl(b2, hi) } else { [0.0; 3] };
+                    screen(Some(l), Some(r)).unwrap()
+                }
+                // Loudness as colour: quiet = first colour, loud = second, loudest = white.
+                "Heat" => {
+                    let col = if level < 0.5 { mix(a, b2, level * 2.0) } else { mix(b2, [255.0; 3], (level - 0.5) * 1.6) };
+                    lvl(col, 0.15 + 0.85 * level)
                 }
                 "Energy" => lvl(mix(a, b2, x * 0.3 + level * 0.7), 0.05 + 0.95 * level.powf(1.5)),
                 // --- patterns ---
