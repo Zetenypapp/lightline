@@ -33,6 +33,8 @@ const ROW_H: f32 = 46.0;
 const SEG_MEASURED: [(&str, usize); 4] = [("H61F6", 84), ("H619C", 40), ("H6609", 10), ("H60A1", 1)];
 /// Lights without real-time mode: driven with one colour by the plain colour command (tested: H60A1 ceiling light).
 const NO_STREAM: [&str; 1] = ["H60A1"];
+/// A track whose light is this runs across all lights in the chain order.
+const CHAIN: &str = "chain";
 /// Lights seen keeping up with 120 frames/s (H61F6 can't; unknown models get 30).
 const FAST_MEASURED: [&str; 1] = ["H619C"];
 
@@ -121,6 +123,9 @@ pub struct App {
     build_open: bool,
     confirm_del: Option<usize>, // scene waiting for a second click on Delete
     live_in: Option<LiveIn>,
+    ended: bool, // the scene just played to its end
+    update: Option<(String, String)>, // newer release: (version, page)
+    update_rx: Option<Receiver<(String, String)>>,
     live_fx: usize,
     live_pal: usize, // 0 = rainbow, else PALETTES[live_pal - 1]
     build_opts: show::Opts,
@@ -178,11 +183,15 @@ impl App {
             build_open: false,
             confirm_del: None,
             live_in: None,
+            ended: false,
+            update: None,
+            update_rx: None,
             live_fx: 0,
             live_pal: 0,
             build_opts: show::Opts::default(),
         };
         app.committed = app.scenes.clone();
+        app.check_update(&cc.egui_ctx);
         app.scan(&cc.egui_ctx);
         app.ensure_audio(&cc.egui_ctx);
         app
@@ -222,12 +231,16 @@ impl App {
 
     /// All the segments of a light, for a track that just got it.
     fn full_segs(&self, id: &str) -> usize {
+        if id == CHAIN {
+            return self.devices.iter().map(|d| self.light_segs(d)).sum::<usize>().max(1);
+        }
         self.devices.iter().find(|d| d.id == id).map_or(15, |d| self.light_segs(d))
     }
 
     fn track_light(&self, tr: &Track) -> String {
         match &tr.dev {
             None => "No light".into(),
+            Some(id) if id == CHAIN => "All lights, chained".into(),
             Some(id) => self.devices.iter().find(|d| &d.id == id).map_or("Light not found".into(), |d| self.dev_name(d)),
         }
     }
@@ -412,17 +425,58 @@ impl App {
         self.show_of(&self.sc().tracks)
     }
 
+    /// Asks GitHub (with Windows' own curl) whether a newer release exists. Silent if offline.
+    fn check_update(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = channel();
+        self.update_rx = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            use std::os::windows::process::CommandExt;
+            let out = std::process::Command::new("curl.exe")
+                .args(["-s", "-m", "6", "-H", "User-Agent: lightline", "https://api.github.com/repos/Zetenypapp/lightline/releases/latest"])
+                .creation_flags(0x0800_0000) // no console window
+                .output();
+            let Ok(out) = out else { return };
+            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return };
+            let (Some(tag), Some(url)) = (v["tag_name"].as_str(), v["html_url"].as_str()) else { return };
+            if newer(tag.trim_start_matches('v'), env!("CARGO_PKG_VERSION")) {
+                let _ = tx.send((tag.to_string(), url.to_string()));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Lights in chain order: the saved order first, then any others.
+    fn chain_devices(&self) -> Vec<&Device> {
+        let mut v: Vec<&Device> = self.settings.chain.iter().filter_map(|id| self.devices.iter().find(|d| &d.id == id)).collect();
+        v.extend(self.devices.iter().filter(|d| !self.settings.chain.contains(&d.id)));
+        v
+    }
+
     fn show_of(&self, tracks: &[Track]) -> Show {
         let mut outputs: Vec<Output> = vec![];
-        for tr in tracks {
-            let Some(d) = tr.dev.as_ref().and_then(|id| self.devices.iter().find(|d| &d.id == id)) else { continue };
-            match outputs.iter_mut().find(|o| o.ip == d.ip) {
-                Some(o) => o.tracks.push(tr.clone()),
-                None => outputs.push(Output { ip: d.ip.clone(), max: self.light_segs(d), lead: -self.settings.loff_ms.get(&d.id).copied().unwrap_or(0.0) / 1000.0, fast: FAST_MEASURED.contains(&d.sku.as_str()), smooth: self.light_smooth(&d.id), simple: NO_STREAM.contains(&d.sku.as_str()), tracks: vec![tr.clone()] }),
+        let mut add = |d: &Device, tr: &Track, win: (usize, usize)| match outputs.iter_mut().find(|o| o.ip == d.ip) {
+            Some(o) => {
+                o.tracks.push(tr.clone());
+                o.win.push(win);
             }
+            None => outputs.push(Output { ip: d.ip.clone(), max: self.light_segs(d), lead: -self.settings.loff_ms.get(&d.id).copied().unwrap_or(0.0) / 1000.0, fast: FAST_MEASURED.contains(&d.sku.as_str()), smooth: self.light_smooth(&d.id), simple: NO_STREAM.contains(&d.sku.as_str()), tracks: vec![tr.clone()], win: vec![win] }),
+        };
+        for tr in tracks {
+            if tr.dev.as_deref() == Some(CHAIN) {
+                let mut at = 0;
+                for d in self.chain_devices() {
+                    let n = self.light_segs(d);
+                    add(d, tr, (at, n));
+                    at += n;
+                }
+                continue;
+            }
+            let Some(d) = tr.dev.as_ref().and_then(|id| self.devices.iter().find(|d| &d.id == id)) else { continue };
+            add(d, tr, (0, usize::MAX));
         }
         for o in &mut outputs {
-            let w = o.tracks.iter().map(|t| t.from + t.segs).max().unwrap_or(1).min(84);
+            let w = o.tracks.iter().zip(&o.win).map(|(t, &(skip, take))| t.from + t.segs.saturating_sub(skip).min(take)).max().unwrap_or(1).min(84);
             o.max = o.max.clamp(1, w.max(1));
         }
         Show {
@@ -485,6 +539,7 @@ impl App {
             self.t = t.min(self.sc().len);
             if !playing {
                 self.set_playing(false);
+                self.ended = true;
                 return;
             }
         } else {
@@ -493,7 +548,24 @@ impl App {
         if self.t >= self.sc().len {
             self.t = self.sc().len;
             self.set_playing(false);
+            self.ended = true;
         }
+    }
+
+    /// Playlist: when a scene ends on Live, start the next (or a random other) one.
+    fn next_in_playlist(&mut self, ctx: &egui::Context) {
+        if !std::mem::take(&mut self.ended) || !self.settings.autonext || self.page != Page::Live || self.scenes.len() < 2 {
+            return;
+        }
+        let n = self.scenes.len();
+        let next = if self.settings.shuffle {
+            let r = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.subsec_nanos() as usize);
+            (self.cur + 1 + r % (n - 1)) % n // any other scene
+        } else {
+            (self.cur + 1) % n
+        };
+        self.open(ctx, next, Page::Live);
+        self.play_when_loaded();
     }
 
     fn open(&mut self, ctx: &egui::Context, i: usize, page: Page) {
@@ -630,6 +702,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
         self.advance();
+        self.next_in_playlist(&ctx);
         self.tick_live(&ctx);
         if self.playing {
             self.lights.set_show(self.show()); // edits reach the lights straight away
@@ -737,6 +810,15 @@ impl App {
                     }
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if let Some(u) = self.update_rx.as_ref().and_then(|r| r.try_recv().ok()) {
+                        self.update = Some(u);
+                    }
+                    if let Some((v, url)) = self.update.clone() {
+                        if accent_button(ui, &format!("Update {v} available")).on_hover_text("Opens the download page").clicked() {
+                            use std::os::windows::process::CommandExt;
+                            let _ = std::process::Command::new("explorer.exe").arg(url).creation_flags(0x0800_0000).spawn();
+                        }
+                    }
                     let n = self.devices.len();
                     let text = if self.status.is_empty() { format!("{n} light{} found", if n == 1 { "" } else { "s" }) } else { self.status.clone() };
                     ui.label(RichText::new(text).color(if self.status.is_empty() { MUTED } else { WARN }));
@@ -766,6 +848,32 @@ impl App {
                 });
                 ui.add_space(16.0);
                 ui.label(RichText::new("Devices").color(MUTED).strong());
+                if self.devices.len() > 1 {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Chain order").color(MUTED)).on_hover_text("The order a track set to \"All lights, chained\" runs across your lights");
+                        let order: Vec<String> = self.chain_devices().iter().map(|d| d.id.clone()).collect();
+                        for (k, id) in order.iter().enumerate() {
+                            let name = self.devices.iter().find(|d| &d.id == id).map_or(id.clone(), |d| self.dev_name(d));
+                            let mut moved = None;
+                            if k > 0 && ui.small_button("←").clicked() {
+                                moved = Some(k - 1);
+                            }
+                            ui.label(RichText::new(name).strong());
+                            if k + 1 < order.len() && ui.small_button("→").clicked() {
+                                moved = Some(k + 1);
+                            }
+                            if let Some(j) = moved {
+                                let mut o = order.clone();
+                                o.swap(k, j);
+                                self.settings.chain = o;
+                                self.settings_dirty = true;
+                            }
+                            if k + 1 < order.len() {
+                                ui.label(RichText::new("·").color(MUTED));
+                            }
+                        }
+                    });
+                }
                 ui.horizontal_wrapped(|ui| {
                     if self.devices.is_empty() {
                         card(ui, |ui| {
@@ -1036,6 +1144,15 @@ impl App {
         ui.label(RichText::new("Drag an effect onto a track, or click to add it at the playhead on the selected track.").color(MUTED).small());
         ui.add_space(10.0);
         ui.label(RichText::new("Lights").color(MUTED).strong());
+        ui.dnd_drag_source(ui.scope_id().with("chainsrc"), Drop::Light(CHAIN.to_string()), |ui| {
+            Frame::new().fill(PANEL2).corner_radius(10).inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("●").color(ACCENT2));
+                    ui.label(RichText::new("All lights, chained").strong());
+                });
+            });
+        }).response.on_hover_text("One long strip: the effect runs across all lights in the chain order set on Home");
         if self.devices.is_empty() {
             ui.label(RichText::new("No lights found yet.").color(MUTED).small());
         }
@@ -1175,6 +1292,7 @@ impl App {
         let current = self.track_light(&tr);
         egui::ComboBox::from_label("Light").selected_text(current).show_ui(ui, |ui| {
             ui.selectable_value(&mut dev, None, "None (preview only)");
+            ui.selectable_value(&mut dev, Some(CHAIN.to_string()), "All lights, chained");
             for d in &self.devices {
                 ui.selectable_value(&mut dev, Some(d.id.clone()), format!("{} · {}", self.dev_name(d), d.ip));
             }
@@ -1265,13 +1383,19 @@ impl App {
         egui::Panel::right("livectl").default_size(340.0).frame(Frame::new().fill(BG).inner_margin(16)).show(ui, |ui| {
             card_wide(ui, |ui| {
                 ui.label(RichText::new("Scenes").color(MUTED).strong());
-                for i in 0..self.scenes.len() {
-                    let label = format!("{}   {}", self.scenes[i].name, fmt(self.scenes[i].len));
-                    if ui.add_sized([ui.available_width(), 36.0], egui::Button::selectable(i == self.cur, label)).clicked() {
-                        self.open(&ctx, i, Page::Live);
-                        self.play_when_loaded();
+                ui.horizontal(|ui| {
+                    self.settings_dirty |= ui.checkbox(&mut self.settings.autonext, "Play next automatically").changed();
+                    self.settings_dirty |= ui.checkbox(&mut self.settings.shuffle, "Shuffle").changed();
+                });
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    for i in 0..self.scenes.len() {
+                        let label = format!("{}   {}", self.scenes[i].name, fmt(self.scenes[i].len));
+                        if ui.add_sized([ui.available_width(), 36.0], egui::Button::selectable(i == self.cur, label)).clicked() {
+                            self.open(&ctx, i, Page::Live);
+                            self.play_when_loaded();
+                        }
                     }
-                }
+                });
             });
             ui.add_space(12.0);
             card_wide(ui, |ui| {
@@ -1662,6 +1786,17 @@ impl App {
 }
 
 // ---------- helpers ----------
+
+/// Is version a (like "0.2.0") newer than b?
+fn newer(a: &str, b: &str) -> bool {
+    let p = |s: &str| s.split('.').map(|x| x.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    p(a) > p(b)
+}
+
+#[test]
+fn version_compare() {
+    assert!(newer("0.2.0", "0.1.0") && newer("0.10.0", "0.9.9") && !newer("0.1.0", "0.1.0") && !newer("0.0.9", "0.1.0"));
+}
 
 fn to_u8(c: Rgb) -> [u8; 3] {
     c.map(|v| v.round().clamp(0.0, 255.0) as u8)

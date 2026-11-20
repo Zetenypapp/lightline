@@ -22,6 +22,7 @@ pub struct Output {
     pub smooth: f64, // 0..100, this light's fade
     pub simple: bool, // no real-time mode (e.g. ceiling lights): one colour by the plain colour command, 10/s
     pub tracks: Vec<Track>,
+    pub win: Vec<(usize, usize)>, // per track: (skip, take) segments, for tracks chained across lights
 }
 
 #[derive(Clone, Default)]
@@ -138,7 +139,7 @@ impl Lights {
             .outputs
             .iter()
             .filter_map(|o| {
-                let cols = sm.step(&o.ip, &fx::light_colors(&o.tracks, t - show.off + o.lead, &cx), ms, o.smooth);
+                let cols = sm.step(&o.ip, &fx::light_colors(&o.tracks, &o.win, t - show.off + o.lead, &cx), ms, o.smooth);
                 let rgb: Vec<u8> = if show.flash { vec![255; cols.len() * 3] } else { cols.iter().flat_map(|c| c.unwrap_or([0.0; 3]).map(|v| (v * k).round() as u8)).collect() };
                 let rgb = stretch(&rgb, o.max);
                 if o.fast && !o.simple {

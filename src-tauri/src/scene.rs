@@ -91,13 +91,16 @@ pub struct Settings {
     pub lsegs: HashMap<String, usize>,  // light id -> most colours it accepts
     pub loff_ms: HashMap<String, f64>,  // light id -> its own timing, negative = earlier
     pub lsmooth: HashMap<String, f64>,  // light id -> its own smoothing (else `smooth`)
+    pub chain: Vec<String>,             // light ids in the order a chained track runs across them
+    pub autonext: bool,                 // Live: play the next scene when one ends
+    pub shuffle: bool,
     pub off_ms: f64,
     pub smooth: f64, // 0..100, fade = smooth * 3 ms
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { names: HashMap::new(), lsegs: HashMap::new(), loff_ms: HashMap::new(), lsmooth: HashMap::new(), off_ms: 0.0, smooth: 40.0 }
+        Settings { names: HashMap::new(), lsegs: HashMap::new(), loff_ms: HashMap::new(), lsmooth: HashMap::new(), chain: vec![], autonext: false, shuffle: false, off_ms: 0.0, smooth: 40.0 }
     }
 }
 

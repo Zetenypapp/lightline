@@ -405,11 +405,15 @@ pub fn track_colors(tr: &Track, t: f64, cx: &Ctx) -> Vec<Option<Rgb>> {
 
 /// One light's colours: each track lands at its start segment. Where tracks overlap, the higher
 /// track (earlier in the list) wins; its dark parts let the tracks below show through.
-pub fn light_colors(tracks: &[Track], t: f64, cx: &Ctx) -> Vec<Option<Rgb>> {
-    let w = tracks.iter().map(|tr| tr.from + tr.segs).max().unwrap_or(0).clamp(1, 84);
+/// `win[k]` = (skip, take): only segments skip..skip+take of track k land on this light (a light's
+/// slice of a track chained across several lights). Missing = the whole track.
+pub fn light_colors(tracks: &[Track], win: &[(usize, usize)], t: f64, cx: &Ctx) -> Vec<Option<Rgb>> {
+    let wk = |k: usize| win.get(k).copied().unwrap_or((0, usize::MAX));
+    let w = tracks.iter().enumerate().map(|(k, tr)| tr.from + tr.segs.saturating_sub(wk(k).0).min(wk(k).1)).max().unwrap_or(0).clamp(1, 84);
     let mut out = vec![None; w];
-    for tr in tracks.iter().rev() {
-        for (i, c) in track_colors(tr, t, cx).into_iter().enumerate() {
+    for (k, tr) in tracks.iter().enumerate().rev() {
+        let (skip, take) = wk(k);
+        for (i, c) in track_colors(tr, t, cx).into_iter().skip(skip).take(take).enumerate() {
             if let Some(o) = out.get_mut(tr.from + i) {
                 *o = over(c, *o);
             }
@@ -498,11 +502,15 @@ mod tests {
             (c.fin, c.fout) = (0.0, 0.0);
         }
         let t = |from, c: &Clip| Track { name: String::new(), segs: 2, from, dev: None, clips: vec![c.clone()] };
-        let out = light_colors(&[t(0, &red), t(1, &blue)], 1.0, &cx);
+        let out = light_colors(&[t(0, &red), t(1, &blue)], &[], 1.0, &cx);
         let px: Vec<[u8; 3]> = out.iter().map(|c| c.unwrap().map(|v| v.round() as u8)).collect();
         assert_eq!(px, vec![[255, 0, 0], [255, 0, 0], [0, 0, 255]], "higher track wins where they overlap");
         let black = Clip { col: [0, 0, 0], ..red.clone() };
-        let out = light_colors(&[t(0, &black), t(0, &blue)], 1.0, &cx);
+        let out = light_colors(&[t(0, &black), t(0, &blue)], &[], 1.0, &cx);
+        assert_eq!(out[0].unwrap().map(|v| v.round() as u8), [0, 0, 255], "dark parts of the top track show the one below");
+        let long = Track { segs: 4, clips: vec![Clip { fx: "Gradient".into(), col: [255, 0, 0], col2: [0, 0, 255], ..Default::default() }], ..t(0, &red) };
+        let second = light_colors(&[long.clone()], &[(2, 2)], 1.0, &cx);
+        assert_eq!((second.len(), second[1]), (2, track_colors(&long, 1.0, &cx)[3]), "a light's slice of a chained track");
         assert_eq!(out[0].unwrap().map(|v| v.round() as u8), [0, 0, 255], "dark parts of the top track show the one below");
     }
 
@@ -586,7 +594,7 @@ fn light_on_song() {
     let (from, to): (f64, f64) = (env("FROM").parse().unwrap(), env("TO").parse().unwrap());
     let mut t = from;
     while t < to {
-        let row: String = light_colors(&tracks, t, &cx).iter().map(|c| {
+        let row: String = light_colors(&tracks, &[], t, &cx).iter().map(|c| {
             let [r, g, b] = c.unwrap_or([0.0; 3]);
             let m = r.max(g).max(b);
             if m < 20.0 { ' ' } else if m < 60.0 { '.' } else if r.min(g).min(b) > 170.0 { 'W' } else if r > 110.0 && g > 140.0 && b < 90.0 { 'L' } else if g > r && g >= b { if m > 140.0 { 'G' } else { 'g' } } else { 'o' }
