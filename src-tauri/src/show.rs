@@ -68,6 +68,10 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
     let base_speed = if chill { 0.5 } else if wild { 2.0 } else { 1.0 };
     let verse_pool: [&'static str; 4] = if beat { ["Beat flash", "Heartbeat", "Stack", "Alternate"] } else if vocals { ["Wave", "Comet", "Aurora", "Plasma"] } else if melody { ["Comet", "Wave", "Scanner", "Meteor shower"] } else { ["Beat flash", "Comet", "Ping-pong", "Theatre chase"] };
     let chorus_pool: [&'static str; 4] = if beat { ["Stack", "Alternate", "Colour wipe", "Converge"] } else if vocals { ["Wave", "Alternate", "Twinkle", "Comet"] } else if melody { ["Comet", "DNA", "Meteor shower", "Converge"] } else { ["Alternate", "Converge", "Colour wipe", "Meteor shower"] };
+    // The music-reactive layer: one of these per part.
+    let verse_react: [&'static str; 4] = if beat { ["Kick", "Kick chase", "Clap", "Bouncing ball"] } else if vocals { ["Voice", "Vocal colour", "Voice", "Heat"] } else if melody { ["Pitch trail", "Kick", "Sparks", "Bass wobble"] } else { ["Kick", "Bass wobble", "Split bands", "Kick chase"] };
+    let chorus_react: [&'static str; 4] = if beat { ["Ripple", "Kick chase", "Bouncing ball", "Clap"] } else if vocals { ["Voice", "Vocal colour", "Heat", "Voice"] } else if wild { ["Fireworks", "Lightning", "Tug of war", "Fireworks"] } else { ["Kick", "Energy", "Tug of war", "Sparks"] };
+    let quiet_react: [&'static str; 4] = ["Voice", "Sparks", "Energy", "Voice"];
     let rnd = |k: u64| (o.seed ^ k.wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 33;
     let strobe = |a: f64, b: f64, col: [u8; 3]| if o.strobes { Clip { speed: 0.5, ..clip("Strobe", a, b, col, BLACK) } } else { flash(a, (b - a).min(0.8), col) };
 
@@ -92,7 +96,7 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
             if parts.get(pi + 1).map(|p| p.2) == Some(Part::Chorus) && !matches!(part, Part::Gap | Part::Break) && !chill {
                 let bars = bars_in(a, b, 1);
                 if let Some(&(x, _)) = bars.iter().rev().nth(1).filter(|bar| bar.0 > a) {
-                    acc.push(clip("Riser", x, b, alt, hot)); // fill up over the last 2 bars into the chorus
+                    acc.push(clip(if pi % 2 == 0 { "Riser" } else { "Drop countdown" }, x, b, alt, hot)); // fill up over the last 2 bars into the chorus
                 }
                 if let Some(&(x, _)) = bars.last().filter(|bar| bar.0 > a && (wild || !o.strobes)) {
                     acc.push(strobe(x, b, hot));
@@ -103,7 +107,7 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
             match part {
                 Part::Intro | Part::Break => {
                     base.push(Clip { bri: 55.0, speed: 0.5 * base_speed, fin: if part == Part::Intro { (b - a).min(3.0) } else { 0.0 }, ..clip(if pi % 2 == 0 { "Wave" } else { "Lava lamp" }, a, b, main, deep) });
-                    react.push(clip("Voice", a, b, alt, main));
+                    react.push(clip(pick(&quiet_react, 999), a, b, alt, main));
                     if dot && !beat {
                         acc.push(clip("Lead", a, b, WHITE, alt));
                     }
@@ -113,7 +117,7 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
                     if dot && melody {
                         acc.push(clip("Lead", a + 0.4, b, WHITE, alt));
                     }
-                    react.push(if vocals { clip("Voice", a, b, alt, main) } else { Clip { bri: if chill { 70.0 } else { 100.0 }, ..clip("Kick", a, b, hot, main) } });
+                    react.push(Clip { bri: if chill { 70.0 } else { 100.0 }, ..clip(pick(&verse_react, 999), a, b, if vocals { alt } else { hot }, main) });
                     for (i, (x, y)) in bars_in(a, b, verse_every).into_iter().enumerate() {
                         let (c1, c2) = if swap(i) { (alt, deep) } else { (main, deep) };
                         base.push(if one { clip("Solid", x, y, deep, BLACK) } else { Clip { bri: 75.0, speed: base_speed, rev: swap(i + 100), ..clip(pick(&verse_pool, i), x, y, c1, c2) } });
@@ -129,7 +133,7 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
                     if dot && !beat {
                         acc.push(clip("Lead", a + 0.5, b, WHITE, hot));
                     }
-                    react.push(if vocals { clip("Voice", a, b, WHITE, alt) } else if beat { clip("Ripple", a, b, WHITE, alt) } else if wild { clip("Fireworks", a, b, hot, WHITE) } else { clip("Kick", a, b, WHITE, alt) });
+                    react.push(clip(pick(&chorus_react, 999), a, b, if wild && !beat && !vocals { hot } else { WHITE }, if wild && !beat && !vocals { WHITE } else { alt }));
                     for (i, (x, y)) in bars_in(a, b, chorus_every).into_iter().enumerate() {
                         let (c1, c2) = if swap(i) { (hot, main) } else { (alt, hot) };
                         base.push(if one { clip("Alternate", x, y, hot, alt) } else { Clip { speed: base_speed, rev: swap(i + 100), ..clip(pick(&chorus_pool, i), x, y, c1, c2) } });
