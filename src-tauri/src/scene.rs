@@ -41,11 +41,35 @@ pub struct Clip {
     pub trans: u8,
     #[serde(default = "half")]
     pub tlen: f64,
+    /// Compound clip ("Compound"): its name, and the clips inside it, at song times (not relative).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inner: Vec<Clip>,
+}
+
+pub const COMPOUND: &str = "Compound";
+
+impl Clip {
+    /// Moves the clip (and everything inside a compound) by dt seconds.
+    pub fn shift(&mut self, dt: f64) {
+        self.start += dt;
+        for c in &mut self.inner {
+            c.shift(dt);
+        }
+    }
+}
+
+/// Wraps clips into one compound clip spanning all of them.
+pub fn group(inner: Vec<Clip>, label: String) -> Clip {
+    let start = inner.iter().map(|c| c.start).fold(f64::MAX, f64::min);
+    let end = inner.iter().map(|c| c.start + c.len).fold(f64::MIN, f64::max);
+    Clip { fx: COMPOUND.into(), start, len: (end - start).max(0.05), label, inner, col: [0x3d, 0xb8, 0x6b], ..Default::default() }
 }
 
 impl Default for Clip {
     fn default() -> Self {
-        Clip { fx: "Solid".into(), start: 0.0, len: 4.0, col: teal(), col2: purple(), bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![], react: 0, mirror: false, repeat: 1, trans: 0, tlen: 0.5 }
+        Clip { fx: "Solid".into(), start: 0.0, len: 4.0, col: teal(), col2: purple(), bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![], react: 0, mirror: false, repeat: 1, trans: 0, tlen: 0.5, label: String::new(), inner: vec![] }
     }
 }
 
@@ -62,6 +86,11 @@ pub struct Track {
     pub from: usize,
     #[serde(default)]
     pub dev: Option<String>,
+    /// Muted: sends nothing. Locked: its clips can't be moved.
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub locked: bool,
     #[serde(default)]
     pub clips: Vec<Clip>,
 }
@@ -96,11 +125,13 @@ pub struct Settings {
     pub shuffle: bool,
     pub off_ms: f64,
     pub smooth: f64, // 0..100, fade = smooth * 3 ms
+    pub colours: Vec<(String, Vec<[u8; 3]>)>, // the user's own colour sets
+    pub presets: Vec<Clip>,                   // saved clips, dragged back in from the library
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { names: HashMap::new(), lsegs: HashMap::new(), loff_ms: HashMap::new(), lsmooth: HashMap::new(), chain: vec![], autonext: false, shuffle: false, off_ms: 0.0, smooth: 40.0 }
+        Settings { names: HashMap::new(), lsegs: HashMap::new(), loff_ms: HashMap::new(), lsmooth: HashMap::new(), chain: vec![], autonext: false, shuffle: false, off_ms: 0.0, smooth: 40.0, colours: vec![], presets: vec![] }
     }
 }
 
@@ -137,7 +168,7 @@ mod hexes {
 
 pub fn demo() -> Scene {
     let clip = |fx: &str, start: f64, len: f64, col: [u8; 3]| Clip { fx: fx.into(), start, len, col, col2: purple(), bri: 100.0, speed: 1.0, rev: false, fin: 0.0, fout: 0.0, pal: vec![], ..Default::default() };
-    let track = |name: &str, clips| Track { name: name.into(), segs: 15, from: 0, dev: None, clips };
+    let track = |name: &str, clips| Track { name: name.into(), segs: 15, from: 0, dev: None, muted: false, locked: false, clips };
     Scene {
         name: "Demo scene".into(),
         len: 60.0,

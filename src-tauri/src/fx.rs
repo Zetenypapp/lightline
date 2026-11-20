@@ -575,12 +575,26 @@ fn pattern(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
 /// All clips playing on a track at time t, layered.
 pub fn track_colors(tr: &Track, t: f64, cx: &Ctx) -> Vec<Option<Rgb>> {
     let n = tr.segs.max(1);
+    if tr.muted {
+        return vec![None; n];
+    }
+    clips_colors(&tr.clips, n, t, cx)
+}
+
+fn clips_colors(clips: &[Clip], n: usize, t: f64, cx: &Ctx) -> Vec<Option<Rgb>> {
     let mut out = vec![None; n];
-    for c in tr.clips.iter().filter(|c| t >= c.start && t < c.start + c.len) {
+    for c in clips.iter().filter(|c| t >= c.start && t < c.start + c.len) {
+        if c.fx == crate::scene::COMPOUND {
+            let k = (c.bri / 100.0) as f32;
+            for (o, col) in out.iter_mut().zip(clips_colors(&c.inner, n, t, cx)) {
+                *o = screen(*o, col.map(|v| lvl(v, k)));
+            }
+            continue;
+        }
         let mut cols = clip_colors(c, n, t, cx);
         // Transition in from the clip that ends where this one starts: crossfade or wipe.
         if c.trans > 0 && t < c.start + c.tlen {
-            if let Some(p) = tr.clips.iter().find(|p| !std::ptr::eq(*p, c) && (p.start + p.len - c.start).abs() < 0.05) {
+            if let Some(p) = clips.iter().find(|p| !std::ptr::eq(*p, c) && (p.start + p.len - c.start).abs() < 0.05) {
                 let k = ((t - c.start) / c.tlen.max(0.01)).clamp(0.0, 1.0) as f32;
                 let prev = clip_colors(&Clip { len: p.len + c.tlen, fout: 0.0, ..p.clone() }, n, t, cx);
                 cols = cols.iter().zip(prev).enumerate().map(|(j, (a, b))| {
@@ -676,13 +690,25 @@ mod tests {
         for fx in EFFECTS {
             for n in [1, 15, 84] {
                 for t in [0.0, 0.37, 3.9] {
-                    let tr = Track { name: String::new(), segs: n, from: 0, dev: None, clips: vec![clip(fx, [47, 216, 180])] };
+                    let tr = Track { name: String::new(), segs: n, from: 0, dev: None, muted: false, locked: false, clips: vec![clip(fx, [47, 216, 180])] };
                     let out = track_colors(&tr, t, &cx);
                     assert_eq!(out.len(), n);
                     assert!(out.iter().flatten().all(|c| c.iter().all(|v| (0.0..=255.0).contains(v))), "{fx}");
                 }
             }
         }
+    }
+
+    #[test]
+    fn compound_plays_what_is_inside() {
+        let cx = Ctx { an: None, bpm: 120.0 };
+        let red = Clip { fx: "Solid".into(), start: 2.0, len: 1.0, col: [255, 0, 0], ..Default::default() };
+        let mut g = crate::scene::group(vec![red], "Chorus 1".into());
+        g.shift(10.0);
+        let tr = Track { name: String::new(), segs: 2, from: 0, dev: None, muted: false, locked: false, clips: vec![g] };
+        assert_eq!(track_colors(&tr, 12.5, &cx)[0], Some([255.0, 0.0, 0.0]), "moved with the compound");
+        assert_eq!(track_colors(&tr, 2.5, &cx)[0], None);
+        assert_eq!(track_colors(&Track { muted: true, ..tr }, 12.5, &cx)[0], None, "muted");
     }
 
     #[test]
@@ -693,7 +719,7 @@ mod tests {
         for c in [&mut red, &mut blue] {
             (c.fin, c.fout) = (0.0, 0.0);
         }
-        let t = |from, c: &Clip| Track { name: String::new(), segs: 2, from, dev: None, clips: vec![c.clone()] };
+        let t = |from, c: &Clip| Track { name: String::new(), segs: 2, from, dev: None, muted: false, locked: false, clips: vec![c.clone()] };
         let out = light_colors(&[t(0, &red), t(1, &blue)], &[], 1.0, &cx);
         let px: Vec<[u8; 3]> = out.iter().map(|c| c.unwrap().map(|v| v.round() as u8)).collect();
         assert_eq!(px, vec![[255, 0, 0], [255, 0, 0], [0, 0, 255]], "higher track wins where they overlap");
@@ -717,7 +743,7 @@ mod tests {
         assert_eq!(r[0], r[4], "repeated twice");
         let red = Clip { fx: "Solid".into(), col: [255, 0, 0], start: 0.0, len: 2.0, ..Default::default() };
         let blue = Clip { fx: "Solid".into(), col: [0, 0, 255], start: 2.0, len: 2.0, trans: 1, tlen: 1.0, ..Default::default() };
-        let tr = Track { name: String::new(), segs: 4, from: 0, dev: None, clips: vec![red, blue] };
+        let tr = Track { name: String::new(), segs: 4, from: 0, dev: None, muted: false, locked: false, clips: vec![red, blue] };
         let mid = track_colors(&tr, 2.5, &cx)[0].unwrap();
         assert!(mid[0] > 100.0 && mid[2] > 100.0, "halfway through a crossfade: both {mid:?}");
         let mut wipe = tr.clone();

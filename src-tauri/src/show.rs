@@ -40,11 +40,12 @@ pub struct Opts {
     pub strobes: bool,
     pub same: bool, // every light does the same thing
     pub seed: u64,  // a new one per build, so two builds differ
+    pub custom: Option<[[u8; 3]; 4]>, // the user's own colour set, instead of PALETTES[pal]
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { pal: 0, speed: 1, focus: 0, strobes: true, same: false, seed: 0 }
+        Opts { pal: 0, speed: 1, focus: 0, strobes: true, same: false, seed: 0, custom: None }
     }
 }
 
@@ -60,7 +61,7 @@ fn flash(at: f64, l: f64, col: [u8; 3]) -> Clip {
 
 /// Tracks for each light `(name, light id, segments)`, for a song `len` seconds long.
 pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opts) -> Vec<Track> {
-    let [deep, main, alt, hot] = PALETTES[o.pal.min(PALETTES.len() - 1)].1;
+    let [deep, main, alt, hot] = o.custom.unwrap_or(PALETTES[o.pal.min(PALETTES.len() - 1)].1);
     let (chill, wild) = (o.speed == 0, o.speed == 2);
     let (beat, vocals, melody) = (o.focus == 1, o.focus == 2, o.focus == 3);
     // Bars per pattern change: verses / choruses.
@@ -147,8 +148,18 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
             }
         }
         let react_name = if vocals { "vocals" } else { "kick" };
-        for (layer, clips) in [("accents", acc), (react_name, react), ("base", base)] {
-            out.push(Track { name: format!("Show · {name} {layer}"), segs: *segs, from: 0, dev: Some(id.clone()), clips });
+        // One compound clip per song part and layer ("Chorus 2"), not hundreds of loose clips.
+        let wrap = |clips: Vec<Clip>| -> Vec<Clip> {
+            let mut seen: Vec<Part> = vec![];
+            parts.iter().filter_map(|&(a, b, part)| {
+                seen.push(part);
+                let k = seen.iter().filter(|p| **p == part).count();
+                let inner: Vec<Clip> = clips.iter().filter(|c| c.start >= a - 1e-9 && c.start < b - 1e-9).cloned().collect();
+                (!inner.is_empty()).then(|| crate::scene::group(inner, format!("{} {k}", part.name())))
+            }).collect()
+        };
+        for (layer, clips) in [("accents", wrap(acc)), (react_name, wrap(react)), ("base", wrap(base))] {
+            out.push(Track { name: format!("Show · {name} {layer}"), segs: *segs, from: 0, dev: Some(id.clone()), muted: false, locked: false, clips });
         }
     }
     out
@@ -157,6 +168,10 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn flat(t: &Track) -> Vec<Clip> {
+        t.clips.iter().flat_map(|c| c.inner.clone()).collect()
+    }
 
     fn song() -> Analysis {
         let beats: Vec<f64> = (0..240).map(|b| b as f64 * 0.5).collect();
@@ -171,18 +186,19 @@ mod tests {
         let t = build(&song(), 120.0, &lights, Opts::default());
         assert_eq!(t.len(), 6);
         for tr in &t {
-            assert!(tr.clips.iter().all(|c| c.start >= 0.0 && c.len > 0.0 && c.start + c.len <= 121.0), "{}", tr.name);
+            assert!(tr.clips.iter().all(|c| c.fx == "Compound"), "wrapped per part");
+            assert!(flat(tr).iter().all(|c| c.start >= 0.0 && c.len > 0.0 && c.start + c.len <= 121.0), "{}", tr.name);
         }
-        assert!(t[0].clips.iter().any(|c| c.fx == "Strobe" && c.start == 48.0), "stop gets a strobe");
-        assert!(t[0].clips.iter().any(|c| c.fx == "Lead"), "strip gets the lead dot");
-        assert!(!t[3].clips.iter().any(|c| c.fx == "Lead"), "1-segment light doesn't");
-        assert!(t[2].clips.windows(2).all(|w| w[0].start + w[0].len <= w[1].start + 1e-9), "base clips don't overlap");
+        assert!(flat(&t[0]).iter().any(|c| c.fx == "Strobe" && c.start == 48.0), "stop gets a strobe");
+        assert!(flat(&t[0]).iter().any(|c| c.fx == "Lead"), "strip gets the lead dot");
+        assert!(!flat(&t[3]).iter().any(|c| c.fx == "Lead"), "1-segment light doesn't");
+        assert!(flat(&t[2]).windows(2).all(|w| w[0].start + w[0].len <= w[1].start + 1e-9), "base clips don't overlap");
     }
 
     #[test]
     fn options_change_the_show() {
         let lights = vec![("Strip".to_string(), "A".to_string(), 84)];
-        let fxs = |o: Opts| build(&song(), 120.0, &lights, o).iter().flat_map(|t| t.clips.iter().map(|c| (c.fx.clone(), (c.start * 10.0) as i64))).collect::<Vec<_>>();
+        let fxs = |o: Opts| build(&song(), 120.0, &lights, o).iter().flat_map(|t| flat(t).into_iter().map(|c| (c.fx.clone(), (c.start * 10.0) as i64))).collect::<Vec<_>>();
         let d = Opts::default();
         assert_ne!(fxs(d), fxs(Opts { seed: 99, ..d }), "a new seed gives a new variation");
         assert_ne!(fxs(d), fxs(Opts { speed: 2, ..d }), "wild changes more often");
