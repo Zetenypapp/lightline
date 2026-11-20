@@ -66,8 +66,8 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
     // Bars per pattern change: verses / choruses.
     let (verse_every, chorus_every) = if chill { (8, 4) } else if wild { (2, 1) } else { (4, 2) };
     let base_speed = if chill { 0.5 } else if wild { 2.0 } else { 1.0 };
-    let verse_pool: [&'static str; 4] = if beat { ["Beat flash", "Heartbeat", "Stack", "Alternate"] } else if vocals { ["Wave", "Comet", "Breathe", "Plasma"] } else if melody { ["Comet", "Wave", "Scanner", "Meteor shower"] } else { ["Beat flash", "Comet", "Ping-pong", "Chase"] };
-    let chorus_pool: [&'static str; 4] = if beat { ["Stack", "Alternate", "Colour wipe", "Converge"] } else if vocals { ["Wave", "Alternate", "Twinkle", "Comet"] } else if melody { ["Comet", "Scanner", "Meteor shower", "Converge"] } else { ["Alternate", "Converge", "Colour wipe", "Meteor shower"] };
+    let verse_pool: [&'static str; 4] = if beat { ["Beat flash", "Heartbeat", "Stack", "Alternate"] } else if vocals { ["Wave", "Comet", "Aurora", "Plasma"] } else if melody { ["Comet", "Wave", "Scanner", "Meteor shower"] } else { ["Beat flash", "Comet", "Ping-pong", "Theatre chase"] };
+    let chorus_pool: [&'static str; 4] = if beat { ["Stack", "Alternate", "Colour wipe", "Converge"] } else if vocals { ["Wave", "Alternate", "Twinkle", "Comet"] } else if melody { ["Comet", "DNA", "Meteor shower", "Converge"] } else { ["Alternate", "Converge", "Colour wipe", "Meteor shower"] };
     let rnd = |k: u64| (o.seed ^ k.wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 33;
     let strobe = |a: f64, b: f64, col: [u8; 3]| if o.strobes { Clip { speed: 0.5, ..clip("Strobe", a, b, col, BLACK) } } else { flash(a, (b - a).min(0.8), col) };
 
@@ -102,7 +102,7 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
             let swap = |i: usize| rnd(pi as u64 * 64 + i as u64 + 7 + lk) % 2 == 1;
             match part {
                 Part::Intro | Part::Break => {
-                    base.push(Clip { bri: 55.0, speed: 0.5 * base_speed, fin: if part == Part::Intro { (b - a).min(3.0) } else { 0.0 }, ..clip("Wave", a, b, main, deep) });
+                    base.push(Clip { bri: 55.0, speed: 0.5 * base_speed, fin: if part == Part::Intro { (b - a).min(3.0) } else { 0.0 }, ..clip(if pi % 2 == 0 { "Wave" } else { "Lava lamp" }, a, b, main, deep) });
                     react.push(clip("Voice", a, b, alt, main));
                     if dot && !beat {
                         acc.push(clip("Lead", a, b, WHITE, alt));

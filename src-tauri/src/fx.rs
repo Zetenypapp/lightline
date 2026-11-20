@@ -6,19 +6,22 @@ use std::collections::HashMap;
 
 pub type Rgb = [f32; 3];
 
-pub const EFFECTS: [&str; 45] = [
+pub const EFFECTS: [&str; 55] = [
     "Solid", "Gradient", "Chase", "Pulse", "Breathe", "Wave", "Comet", "Sparkle", "Fire", "Alternate", "Beat flash", "Strobe", "Rainbow",
     "Riser", "Converge", "Scanner", "Stack", "Heartbeat", "Colour jump",
     "Plasma", "Meteor shower", "Ping-pong", "Colour wipe", "Twinkle", "Police",
+    "Lava lamp", "Aurora", "Matrix rain", "Candle", "DNA", "Theatre chase",
     "Bass hit", "Spectrum", "Meter", "Visualizer", "Kick", "Voice", "Lead",
     "Ripple", "Hi-hats", "Glitch", "Snare", "Bass VU", "Drop flash", "Treble",
     "Fireworks", "Lightning", "EQ bars", "Bouncing ball", "Sparks", "Energy",
+    "Vocal colour", "Drop countdown", "Bass wobble", "Clap",
 ];
 
 /// Effects that follow the song itself (the rest are patterns timed to the beat).
-pub const REACTIVE: [&str; 20] = [
+pub const REACTIVE: [&str; 24] = [
     "Bass hit", "Spectrum", "Meter", "Visualizer", "Kick", "Voice", "Lead", "Ripple", "Hi-hats", "Glitch", "Snare", "Bass VU", "Drop flash", "Treble",
     "Fireworks", "Lightning", "EQ bars", "Bouncing ball", "Sparks", "Energy",
+    "Vocal colour", "Drop countdown", "Bass wobble", "Clap",
 ];
 
 /// Starting colours for effects that need specific ones.
@@ -31,11 +34,15 @@ pub fn default_colors(fx: &str) -> Option<([u8; 3], [u8; 3])> {
         "Meter" => ([0x2f, 0xd8, 0xb4], [0xff, 0x2a, 0x4a]),
         "Hi-hats" => ([0x1a, 0x2a, 0x6c], [0xff, 0xff, 0xff]),
         "Snare" | "Drop flash" => ([0xff, 0xff, 0xff], [0x00, 0x00, 0x00]),
-        "Ripple" | "Meteor shower" => ([0x2f, 0xd8, 0xb4], [0xff, 0xff, 0xff]),
+        "Ripple" | "Meteor shower" | "Drop countdown" => ([0x2f, 0xd8, 0xb4], [0xff, 0xff, 0xff]),
         "Fireworks" => ([0xff, 0x6a, 0x10], [0xc0, 0x30, 0xff]),
         "Lightning" => ([0x90, 0xa8, 0xff], [0xff, 0xff, 0xff]),
         "Twinkle" => ([0xff, 0xd0, 0x80], [0xa0, 0xc8, 0xff]),
         "Police" => ([0xff, 0x00, 0x00], [0x00, 0x30, 0xff]),
+        "Lava lamp" => ([0xff, 0x20, 0x60], [0xff, 0x90, 0x00]),
+        "Aurora" => ([0x10, 0xff, 0x90], [0x80, 0x30, 0xff]),
+        "Matrix rain" => ([0x00, 0xff, 0x40], [0xd0, 0xff, 0xd0]),
+        "Candle" => ([0xff, 0x50, 0x00], [0xff, 0xc0, 0x50]),
         _ => return None,
     })
 }
@@ -202,7 +209,7 @@ impl Ctx<'_> {
 }
 
 /// Effects coloured by the clip's colour list (rainbow when it is empty).
-pub const PALETTE_FX: [&str; 6] = ["Spectrum", "Meter", "Visualizer", "Colour jump", "EQ bars", "Colour wipe"];
+pub const PALETTE_FX: [&str; 7] = ["Spectrum", "Meter", "Visualizer", "Colour jump", "EQ bars", "Colour wipe", "Vocal colour"];
 
 /// Colour at x (0..1) along the clip's colour list; empty list = rainbow.
 fn pal_at(pal: &[[u8; 3]], x: f32) -> Rgb {
@@ -274,7 +281,9 @@ fn pattern(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
     let level = match c.fx.as_str() {
         "Kick" => cx.kick(t).powf(0.6),
         "Voice" => cx.voice(t),
-        "Snare" | "Glitch" => cx.snare(t),
+        "Snare" | "Glitch" | "Clap" => cx.snare(t),
+        "Vocal colour" => cx.voice(t),
+        "Bass wobble" => cx.band(t, 0),
         "Hi-hats" => cx.hats(t),
         "Treble" => cx.treble(t),
         "Bass VU" => cx.band(t, 0),
@@ -286,7 +295,15 @@ fn pattern(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
     let rings = if matches!(c.fx.as_str(), "Ripple" | "Fireworks" | "Bouncing ball") { cx.kick_onsets(t) } else { vec![] };
     // Without a song: a kick every beat, so the effect still shows something.
     let rings = if cx.an.is_none() && rings.is_empty() && c.fx != "Ripple" { let bp = cx.beat_pos(t); vec![((frac(bp) * cx.beat()) as f32, 1.0, bp.floor() as usize)] } else { rings };
-    let lead = matches!(c.fx.as_str(), "Lead" | "Drop flash" | "Sparks").then(|| cx.vis(t));
+    let lead = matches!(c.fx.as_str(), "Lead" | "Drop flash" | "Sparks" | "Vocal colour").then(|| cx.vis(t));
+    // Drop countdown: (fill over the 4 beats before the next chorus, flash just after one starts).
+    // No song sections (live, or none found): the clip's own end is the drop.
+    let drop = (c.fx == "Drop countdown").then(|| {
+        let ch = cx.an.map(|a| a.sections.iter().filter(|s| s.1 == crate::analysis::Part::Chorus).map(|s| s.0).collect::<Vec<_>>()).unwrap_or_default();
+        let next = ch.iter().copied().find(|&s| s > t).unwrap_or(c.start + c.len);
+        let prev = ch.iter().copied().filter(|&s| s <= t).last().unwrap_or(f64::MIN);
+        ((1.0 - (next - t) / (4.0 * cx.beat())).clamp(0.0, 1.0) as f32, (-(t - prev) * 3.0).exp() as f32)
+    });
     let bars = (c.fx == "EQ bars").then(|| (0..8).map(|k| cx.spec(t, (k as f32 + 0.5) / 8.0).powf(1.3)).collect::<Vec<_>>());
     let q = ((t - c.start) / c.len.max(1e-6)).clamp(0.0, 1.0) as f32; // how far into the clip
     let edge = |x: f32| x.min(1.0 - x) * 2.0; // 0 at both ends, 1 in the middle
@@ -418,6 +435,54 @@ fn pattern(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
                     let g = ((x * GROUPS as f32) as usize).min(GROUPS - 1);
                     let hit = if cx.an.is_none() { if rnd(i as f64, (p * 6.0).floor()) > 0.9 { 1.0 } else { 0.0 } } else { v.hit[g] };
                     if rnd(i as f64, (t * 20.0).floor()) < hit as f64 * 0.7 { mix(a, b2, x) } else { [0.0; 3] }
+                }
+                "Vocal colour" => lvl(pal_at(&c.pal, lead.as_ref().unwrap().at * 0.7 + x * 0.3), 0.08 + 0.92 * level),
+                "Drop countdown" => {
+                    let (fill, fl) = drop.unwrap();
+                    let bar = if fill > 0.0 && edge(x) <= fill { lvl(mix(a, b2, fill), 0.3 + 0.7 * fill) } else { [0.0; 3] };
+                    mix(bar, [255.0; 3], fl)
+                }
+                "Bass wobble" => lvl(mix(a, b2, x), level * (0.5 + 0.5 * (std::f64::consts::TAU * (x as f64 * 3.0 - p * 2.0)).sin() as f32)),
+                // Both ends snap in towards the middle on each snare.
+                "Clap" => if level > 0.05 && (n == 1 || edge(x) <= level) { lvl(mix(a, b2, edge(x)), level) } else { [0.0; 3] },
+                "Lava lamp" => {
+                    let v = (0..3).map(|k| {
+                        let c0 = 0.5 + 0.4 * (p * (0.13 + 0.07 * k as f64) + k as f64 * 2.1).sin();
+                        (-((x as f64 - c0) / 0.15).powi(2)).exp()
+                    }).sum::<f64>().min(1.0) as f32;
+                    lvl(mix(a, b2, v), 0.25 + 0.75 * v)
+                }
+                "Aurora" => {
+                    let x = x as f64;
+                    let hue = 0.5 + 0.5 * (x * 5.0 + p * 0.8 + (x * 11.0 - p * 0.5).sin()).sin();
+                    let glow = (0.5 + 0.5 * (x * 3.0 - p * 0.3).sin()).powi(2);
+                    lvl(mix(a, b2, hue as f32), (0.15 + 0.85 * glow) as f32)
+                }
+                // Drops at random spots running down the strip, a bright head with a short tail.
+                "Matrix rain" => (0..4).fold([0.0; 3], |o, k| {
+                    let ph = p * 0.6 + k as f64 * 0.25;
+                    let (cyc, f) = (ph.floor(), frac(ph) as f32);
+                    let head = rnd(k as f64, cyc) as f32 * 0.5 + f * 0.6;
+                    let d = head - x;
+                    let v = if d < 0.0 { 0.0 } else { (1.0 - d / 0.2).max(0.0) * (1.0 - f) };
+                    screen(Some(o), Some(if d * n as f32 <= 1.0 && d >= 0.0 { lvl(b2, 1.0 - f) } else { lvl(a, v) })).unwrap()
+                }),
+                // Smooth warm flicker: random levels per group of segments, blended over time.
+                "Candle" => {
+                    let (g, s) = ((i / 3) as f64, p * 6.0);
+                    let k = frac(s) as f32;
+                    let f = (rnd(g, s.floor()) as f32 * (1.0 - k) + rnd(g, s.floor() + 1.0) as f32 * k).powf(0.7);
+                    lvl(mix(a, b2, f), 0.45 + 0.55 * f)
+                }
+                // Two colours twisting around each other.
+                "DNA" => {
+                    let s = (std::f64::consts::TAU * (x as f64 * 2.0 - p * 0.5)).sin() as f32;
+                    screen(Some(lvl(a, s.max(0.0).powi(3))), Some(lvl(b2, (-s).max(0.0).powi(3)))).unwrap()
+                }
+                // Blocks of 3 lit, 3 dark, colours alternating, crawling half a block per beat.
+                "Theatre chase" => {
+                    let k = (i as i64 + (b * 1.5).floor() as i64).div_euclid(3);
+                    if k.rem_euclid(2) == 0 { if k.rem_euclid(4) == 0 { a } else { b2 } } else { [0.0; 3] }
                 }
                 "Energy" => lvl(mix(a, b2, x * 0.3 + level * 0.7), 0.05 + 0.95 * level.powf(1.5)),
                 // --- patterns ---
