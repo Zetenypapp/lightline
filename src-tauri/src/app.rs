@@ -69,6 +69,16 @@ struct Drag {
 
 type Loaded = (String, Result<(Analysis, f64), String>);
 
+/// Following a media player (Riff, Spotify, ...): its song's scene in sync, or reacting live.
+struct Follow {
+    rx: Receiver<Option<crate::media::NowPlaying>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    np: Option<crate::media::NowPlaying>,
+    at: Instant,                   // when np was read
+    scene: Option<usize>,          // the scene being played along
+    synced: Option<(Instant, f64)>, // when the lights were last started, at which song time
+}
+
 /// Reacting to whatever the PC is playing.
 struct LiveIn {
     _stream: cpal::Stream,
@@ -124,6 +134,7 @@ pub struct App {
     confirm_del: Option<usize>, // scene waiting for a second click on Delete
     live_in: Option<LiveIn>,
     ended: bool, // the scene just played to its end
+    follow: Option<Follow>,
     update: Option<(String, String)>, // newer release: (version, page)
     update_rx: Option<Receiver<(String, String)>>,
     live_fx: usize,
@@ -184,6 +195,7 @@ impl App {
             confirm_del: None,
             live_in: None,
             ended: false,
+            follow: None,
             update: None,
             update_rx: None,
             live_fx: 0,
@@ -383,6 +395,11 @@ impl App {
     }
 
     fn start_live(&mut self) {
+        self.stop_follow();
+        self.start_live_keep_follow();
+    }
+
+    fn start_live_keep_follow(&mut self) {
         self.set_playing(false);
         let buf = Arc::new(std::sync::Mutex::new(vec![]));
         match audio::capture(buf.clone()) {
@@ -394,6 +411,77 @@ impl App {
                 self.lights.play(0.0, false);
             }
             Err(e) => self.status = format!("Can't listen to the PC audio: {e}"),
+        }
+    }
+
+    fn start_follow(&mut self, ctx: &egui::Context) {
+        self.set_playing(false);
+        let (tx, rx) = channel();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let c = ctx.clone();
+        crate::media::watch(tx, stop.clone(), move || c.request_repaint());
+        self.follow = Some(Follow { rx, stop, np: None, at: Instant::now(), scene: None, synced: None });
+    }
+
+    fn stop_follow(&mut self) {
+        if let Some(f) = self.follow.take() {
+            f.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if f.synced.is_some() {
+                let l = self.lights.clone();
+                std::thread::spawn(move || l.stop());
+            }
+        }
+        self.stop_live();
+    }
+
+    /// Follow mode, every frame: play the matching scene in sync with the player, else react live.
+    fn tick_follow(&mut self, ctx: &egui::Context) {
+        let Some(f) = self.follow.as_mut() else { return };
+        while let Ok(np) = f.rx.try_recv() {
+            (f.np, f.at) = (np, Instant::now());
+        }
+        let np = f.np.clone().filter(|n| n.playing);
+        let songs: Vec<(Option<&str>, usize)> = self.scenes.iter().map(|s| (s.audio.as_ref().map(|a| a.name.as_str()), s.tracks.iter().map(|t| t.clips.len()).sum())).collect();
+        let want = np.as_ref().and_then(|n| crate::media::match_scene(&n.title, &songs));
+        let f = self.follow.as_mut().unwrap();
+        let had = f.synced.is_some();
+        if want != f.scene || np.is_none() {
+            f.scene = want;
+            f.synced = None;
+            if had {
+                let l = self.lights.clone();
+                std::thread::spawn(move || l.stop());
+            }
+        }
+        match (np, want) {
+            (Some(n), Some(i)) => {
+                self.stop_live();
+                if self.cur != i {
+                    let page = self.page;
+                    self.open(ctx, i, page);
+                }
+                let f = self.follow.as_ref().unwrap();
+                let t = n.pos + f.at.elapsed().as_secs_f64();
+                if self.an.is_none() {
+                    return; // the scene's song is still being analysed
+                }
+                self.t = t.min(self.sc().len);
+                // (Re)start the lights' clock when it starts or drifts more than 0.15 s from the player.
+                let lights_t = f.synced.map(|(at, t0)| t0 + at.elapsed().as_secs_f64());
+                if lights_t.is_none_or(|lt| (lt - t).abs() > 0.15) {
+                    self.lights.set_show(self.show());
+                    self.lights.play(t, false);
+                    self.follow.as_mut().unwrap().synced = Some((Instant::now(), t));
+                }
+                self.lights.set_show(self.show());
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+            (Some(_), None) => {
+                if self.live_in.is_none() {
+                    self.start_live_keep_follow();
+                }
+            }
+            (None, _) => self.stop_live(),
         }
     }
 
@@ -492,7 +580,7 @@ impl App {
 
     fn set_playing(&mut self, on: bool) {
         if on {
-            self.stop_live();
+            self.stop_follow();
         }
         if on == self.playing {
             return;
@@ -703,6 +791,7 @@ impl eframe::App for App {
         self.poll(&ctx);
         self.advance();
         self.next_in_playlist(&ctx);
+        self.tick_follow(&ctx);
         self.tick_live(&ctx);
         if self.playing {
             self.lights.set_show(self.show()); // edits reach the lights straight away
@@ -1345,7 +1434,8 @@ impl App {
     fn stage(&mut self, ui: &mut Ui, big: bool, max_h: f32) {
         let ms = self.epoch.elapsed().as_secs_f64() * 1000.0;
         let k = if self.black { 0.0 } else { (self.bri / 100.0) as f32 };
-        let rows: Vec<(String, Vec<Option<Rgb>>)> = if self.live_in.is_some() || self.page == Page::React {
+        let following = self.follow.as_ref().is_some_and(|f| f.synced.is_some());
+        let rows: Vec<(String, Vec<Option<Rgb>>)> = if !following && (self.live_in.is_some() || self.page == Page::React) {
             let cx = Ctx { an: self.live_in.as_ref().map(|l| &*l.an), bpm: 120.0 };
             let t = self.live_in.as_ref().map_or(self.epoch.elapsed().as_secs_f64(), |l| l.t0.elapsed().as_secs_f64());
             self.live_tracks().iter().map(|tr| (tr.name.clone(), fx::track_colors(tr, t, &cx))).collect()
@@ -1460,6 +1550,22 @@ impl App {
     fn react(&mut self, ui: &mut Ui) {
         egui::Panel::right("reactctl").default_size(340.0).frame(Frame::new().fill(BG).inner_margin(16)).show(ui, |ui| {
             card_wide(ui, |ui| {
+                ui.label(RichText::new("Media player").color(MUTED).strong());
+                let on = self.follow.is_some();
+                let b = ui.add_sized([ui.available_width(), 40.0], egui::Button::new(if on { "Stop following" } else { "Follow media player" }).selected(on));
+                if b.on_hover_text("Riff, Spotify, a browser...: songs you made a scene for play that scene in sync, everything else gets the live look below").clicked() {
+                    if on { self.stop_follow() } else { self.start_follow(ui.ctx()) }
+                }
+                if let Some(f) = &self.follow {
+                    let text = match (&f.np, f.scene) {
+                        (Some(n), Some(i)) if n.playing => format!("Now: {}\n→ playing scene \"{}\" in sync", n.title, self.scenes[i].name),
+                        (Some(n), None) if n.playing => format!("Now: {}\n→ no scene for this song: reacting live", n.title),
+                        (Some(n), _) => format!("Paused: {}", n.title),
+                        (None, _) => "Nothing playing (or the player doesn't show in Windows' media controls)".into(),
+                    };
+                    ui.label(RichText::new(text).color(ACCENT).small());
+                }
+                ui.add_space(10.0);
                 ui.label(RichText::new("PC audio").color(MUTED).strong());
                 let on = self.live_in.is_some();
                 let b = ui.add_sized([ui.available_width(), 40.0], egui::Button::new(if on { "Stop listening to PC audio" } else { "React to PC audio" }).selected(on));

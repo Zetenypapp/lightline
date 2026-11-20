@@ -17,7 +17,10 @@ Native Windows app written in Rust: a single ~7 MB `.exe`, no browser engine, no
 - **Layers:** several tracks can drive one light; the higher track wins, and its dark parts let the tracks below show through.
 - **Build show:** generates a full layered show for a song. You pick the colour set (20 of them), the speed (Chill/Normal/Wild), what it focuses on (beat, vocals or melody) and whether it strobes. Every build is a new variation.
 - **React to PC audio:** the lights follow whatever is playing on the PC (Spotify, YouTube, games) in real time, no song import needed.
-- **Live page:** play scenes full screen, hold **F** to flash every light white, **B** for blackout.
+- **Follow your media player:** works with [Riff](https://github.com/rootscripts/riff), Spotify, browsers, anything that shows in Windows' media controls. When a song plays that you made a scene for, Lightline plays that scene in sync with the player; any other song gets the live look.
+- **Chain lights:** one track can run across all your lights as one long strip.
+- **Lights go back to how they were** when a show stops, and Lightline tells you when a new version is out.
+- **Live page:** play scenes full screen with a playlist (play next, shuffle), hold **F** to flash every light white, **B** for blackout.
 - **Per-light tuning:** timing offset (to line up slower lights), smoothing, and the number of segments each light accepts.
 
 ![Build a light show](docs/build-show.png)
@@ -33,6 +36,7 @@ Any Govee light with **LAN Control** should work. Tested on:
 | H619C | RGBIC LED Strip (coated) 10 m | 40 segments, keeps up with 120 frames/s |
 | H61F6 | Strip Light 2 Pro 10 m | 84 segments, about 24 frames/s |
 | H615A | RGB LED Strip 5 m | 1 segment |
+| H60A1 | Ceiling light | no real-time mode: one colour at a time, up to 10 changes a second |
 
 Lights without LAN Control (for example the TV Backlight 3 Lite) can't be controlled.
 
@@ -45,7 +49,7 @@ Lights without LAN Control (for example the TV Backlight 3 Lite) can't be contro
 3. When Windows asks about network access, allow it, including on **public networks** if your network is set to Public. Otherwise Lightline can't find your lights.
 4. Your lights show up on **Home**. Click **New scene**, import a song in the **Editor**, then either drag effects onto the tracks or press **Build show…**.
 
-Requires Windows 10 or 11. Lightline talks to the lights directly on your network (Govee LAN API, UDP); nothing leaves your home.
+Requires Windows 10 or 11. Lightline talks to the lights directly on your network (Govee LAN API, UDP). The only internet request is a check for new versions on GitHub at start-up.
 
 ## Build from source
 
