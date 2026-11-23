@@ -883,8 +883,11 @@ impl App {
                 ids.push(id);
             }
         }
-        if ids.is_empty() {
-            ids = self.devices.iter().map(|d| d.id.clone()).collect();
+        // Plus every light found now, so a light added later (or never in the scene) gets a show too.
+        for d in &self.devices {
+            if !ids.contains(&d.id) {
+                ids.push(d.id.clone());
+            }
         }
         let lights: Vec<(String, String, usize)> = ids.iter().map(|id| {
             let name = self.devices.iter().find(|d| &d.id == id).map_or(id.clone(), |d| self.dev_name(d));
