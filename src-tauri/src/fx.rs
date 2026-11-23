@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 pub type Rgb = [f32; 3];
 
-pub const EFFECTS: [&str; 60] = [
+pub const EFFECTS: [&str; 61] = [
     "Solid", "Gradient", "Chase", "Pulse", "Breathe", "Wave", "Comet", "Sparkle", "Fire", "Alternate", "Beat flash", "Strobe", "Rainbow",
     "Riser", "Converge", "Scanner", "Stack", "Heartbeat", "Colour jump",
     "Plasma", "Meteor shower", "Ping-pong", "Colour wipe", "Twinkle", "Police",
@@ -15,15 +15,15 @@ pub const EFFECTS: [&str; 60] = [
     "Ripple", "Hi-hats", "Glitch", "Snare", "Bass VU", "Drop flash", "Treble",
     "Fireworks", "Lightning", "EQ bars", "Bouncing ball", "Sparks", "Energy",
     "Vocal colour", "Drop countdown", "Bass wobble", "Clap",
-    "Kick chase", "Pitch trail", "Split bands", "Tug of war", "Heat",
+    "Kick chase", "Pitch trail", "Split bands", "Tug of war", "Heat", "Full band",
 ];
 
 /// Effects that follow the song itself (the rest are patterns timed to the beat).
-pub const REACTIVE: [&str; 29] = [
+pub const REACTIVE: [&str; 30] = [
     "Bass hit", "Spectrum", "Meter", "Visualizer", "Kick", "Voice", "Lead", "Ripple", "Hi-hats", "Glitch", "Snare", "Bass VU", "Drop flash", "Treble",
     "Fireworks", "Lightning", "EQ bars", "Bouncing ball", "Sparks", "Energy",
     "Vocal colour", "Drop countdown", "Bass wobble", "Clap",
-    "Kick chase", "Pitch trail", "Split bands", "Tug of war", "Heat",
+    "Kick chase", "Pitch trail", "Split bands", "Tug of war", "Heat", "Full band",
 ];
 
 /// Starting colours for effects that need specific ones.
@@ -47,6 +47,7 @@ pub fn default_colors(fx: &str) -> Option<([u8; 3], [u8; 3])> {
         "Candle" => ([0xff, 0x50, 0x00], [0xff, 0xc0, 0x50]),
         "Heat" => ([0x40, 0x00, 0xa0], [0xff, 0x30, 0x00]),
         "Tug of war" => ([0xff, 0x20, 0x40], [0x20, 0x80, 0xff]),
+        "Full band" => ([0xff, 0x20, 0x60], [0x20, 0xe0, 0xff]),
         _ => return None,
     })
 }
@@ -213,7 +214,7 @@ impl Ctx<'_> {
 }
 
 /// Effects coloured by the clip's colour list (rainbow when it is empty).
-pub const PALETTE_FX: [&str; 7] = ["Spectrum", "Meter", "Visualizer", "Colour jump", "EQ bars", "Colour wipe", "Vocal colour"];
+pub const PALETTE_FX: [&str; 8] = ["Full band", "Spectrum", "Meter", "Visualizer", "Colour jump", "EQ bars", "Colour wipe", "Vocal colour"];
 
 /// Colour at x (0..1) along the clip's colour list; empty list = rainbow.
 fn pal_at(pal: &[[u8; 3]], x: f32) -> Rgb {
@@ -316,6 +317,8 @@ fn pattern(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
             Some((l[0] as f32 / 255.0, (l[1] as f32 / 255.0).powf(0.35) * (1.0 - k as f32 / 10.0)))
         }).collect()
     };
+    // Full band: kick, snare, voice, hi-hats.
+    let band4 = (c.fx == "Full band").then(|| [cx.kick(t).powf(0.6), cx.snare(t), cx.voice(t), cx.hats(t)]);
     let bars = (c.fx == "EQ bars").then(|| (0..8).map(|k| cx.spec(t, (k as f32 + 0.5) / 8.0).powf(1.3)).collect::<Vec<_>>());
     let q = ((t - c.start) / c.len.max(1e-6)).clamp(0.0, 1.0) as f32; // how far into the clip
     let edge = |x: f32| x.min(1.0 - x) * 2.0; // 0 at both ends, 1 in the middle
@@ -510,6 +513,17 @@ fn pattern(c: &Clip, n: usize, t: f64, cx: &Ctx) -> Vec<Rgb> {
                     let z = ((x * 3.0) as usize).min(2);
                     lvl(mix(a, b2, z as f32 / 2.0), cx.band(t, z).powf(1.3))
                 }
+                // The whole strip, mirrored from the middle out: kick in the middle, then snare, voice, hi-hats at the ends.
+                // Each zone keeps a dim glow and fills out from its own middle as its sound plays.
+                "Full band" => {
+                    let lv = band4.as_ref().unwrap();
+                    let d = (x - 0.5).abs() * 2.0;
+                    let z = if n == 1 { (0..4).max_by(|&p, &q| lv[p].total_cmp(&lv[q])).unwrap() } else { ((d * 4.0) as usize).min(3) };
+                    let col = if c.pal.is_empty() { mix(a, b2, z as f32 / 3.0) } else { pal_at(&c.pal, z as f32 / 3.0) };
+                    let e = ((d * 4.0 - z as f32) - 0.5).abs() * 2.0; // 0 in the zone's middle, 1 at its edges
+                    let on = if n == 1 { true } else if z == 3 { rnd(i as f64, (t * 16.0).floor()) < lv[3] as f64 } else { e <= lv[z] };
+                    lvl(col, if on && lv[z] > 0.03 { 0.25 + 0.75 * lv[z] } else { 0.06 })
+                }
                 // Bass pushes in from the start, treble from the end.
                 "Tug of war" => {
                     let (lo, hi) = (cx.band(t, 0), cx.band(t, 2));
@@ -697,6 +711,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn full_band_lights_the_whole_strip() {
+        let cx = Ctx { an: None, bpm: 120.0 };
+        let c = Clip { fx: "Full band".into(), start: 0.0, len: 10.0, col: [255, 0, 0], col2: [0, 0, 255], ..Default::default() };
+        let out = pattern(&c, 40, 1.0, &cx);
+        assert!(out.iter().all(|o| o.iter().sum::<f32>() > 0.0), "no dark corner");
+        assert_eq!(out[0], out[39], "mirrored");
+        assert_ne!(out[0], out[20], "ends and middle differ");
     }
 
     #[test]
