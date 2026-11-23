@@ -71,7 +71,6 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
     let chorus_pool: [&'static str; 4] = if beat { ["Stack", "Alternate", "Colour wipe", "Converge"] } else if vocals { ["Wave", "Alternate", "Twinkle", "Comet"] } else if melody { ["Comet", "DNA", "Meteor shower", "Converge"] } else { ["Alternate", "Converge", "Colour wipe", "Meteor shower"] };
     // The music-reactive layer: one of these per part.
     let verse_react: [&'static str; 4] = if beat { ["Kick", "Kick chase", "Clap", "Bouncing ball"] } else if vocals { ["Voice", "Vocal colour", "Voice", "Heat"] } else if melody { ["Pitch trail", "Kick", "Sparks", "Bass wobble"] } else { ["Full band", "Bass wobble", "Split bands", "Kick chase"] };
-    let chorus_react: [&'static str; 4] = if beat { ["Ripple", "Full band", "Bouncing ball", "Clap"] } else if vocals { ["Voice", "Vocal colour", "Heat", "Voice"] } else if wild { ["Fireworks", "Lightning", "Tug of war", "Fireworks"] } else { ["Full band", "Energy", "Tug of war", "Sparks"] };
     let quiet_react: [&'static str; 4] = ["Voice", "Sparks", "Energy", "Voice"];
     let rnd = |k: u64| (o.seed ^ k.wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 33;
     let strobe = |a: f64, b: f64, col: [u8; 3]| if o.strobes { Clip { speed: 0.5, ..clip("Strobe", a, b, col, BLACK) } } else { flash(a, (b - a).min(0.8), col) };
@@ -134,7 +133,7 @@ pub fn build(an: &Analysis, len: f64, lights: &[(String, String, usize)], o: Opt
                     if dot && !beat {
                         acc.push(clip("Lead", a + 0.5, b, WHITE, hot));
                     }
-                    react.push(clip(pick(&chorus_react, 999), a, b, if wild && !beat && !vocals { hot } else { WHITE }, if wild && !beat && !vocals { WHITE } else { alt }));
+                    react.push(clip("Full band", a, b, hot, alt));
                     for (i, (x, y)) in bars_in(a, b, chorus_every).into_iter().enumerate() {
                         let (c1, c2) = if swap(i) { (hot, main) } else { (alt, hot) };
                         base.push(if one { clip("Alternate", x, y, hot, alt) } else { Clip { speed: base_speed, rev: swap(i + 100), ..clip(pick(&chorus_pool, i), x, y, c1, c2) } });
